@@ -1,0 +1,1478 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>סבב סגירות - שוחמי</title>
+<style>
+  body { margin:0; background:#09090b; font-family:system-ui,-apple-system,sans-serif; }
+  * { box-sizing:border-box; }
+  button { font-family:inherit; }
+  input { font-family:inherit; }
+</style>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+</head>
+<body>
+<div id="root" style="color:white;text-align:center;padding:40px;">טוען...</div>
+
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyDhrnHAG8h-iIWmGXrQSxaBr1f1bytVeSM",
+  authDomain: "sgirot-shuhami.firebaseapp.com",
+  projectId: "sgirot-shuhami",
+  storageBucket: "sgirot-shuhami.firebasestorage.app",
+  messagingSenderId: "467515038562",
+  appId: "1:467515038562:web:41e0123ed285da084cea3b"
+};
+
+let db=null, DOC=null, fbOK=false;
+
+const PWD = "ziv123";
+
+// Role types for closures. "counts" = does it add to total fairness by default.
+const ROLES = {
+  atlit:   { label:"\u05E6 \u05E6\u05E4\u05D5\u05DF", color:"#34d399", needsSamal:true,  counts:true },
+  t23:     { label:"\u05E6\u05F423",       color:"#60a5fa", needsSamal:false, counts:true },
+  sadat:   { label:"\u05E9\u05D3\u05EA",        color:"#22d3ee", needsSamal:false, counts:true },
+  konan:   { label:"\u05DB\u05D5\u05E0\u05DF \u05D1\u05D9\u05EA", color:"#fb923c", needsSamal:false, counts:false }, // counts only if activated
+  kk:      { label:"\u05DE\u05E4\u05E7\u05D3 \u05DB\u05F4\u05DB",   color:"#fcd34d", needsSamal:false, counts:true },
+  mkBoker: { label:"\u05DE\u05E7\u05D5\u05E6\u05E8\u05EA \u05D1\u05D5\u05E7\u05E8", color:"#a78bfa", needsSamal:false, counts:false }, // tracked separately, not a closure
+  mkErev:  { label:"\u05DE\u05E7\u05D5\u05E6\u05E8\u05EA \u05E2\u05E8\u05D1",  color:"#c084fc", needsSamal:false, counts:false }
+};
+const ROLE_ORDER = ["atlit","t23","sadat","konan","kk","mkBoker","mkErev"];
+// allowed people-count options per role (first = default). null = fully flexible (any count)
+const ROLE_SIZES = { atlit:[1,2,3,4], t23:[1,2], sadat:[1,2,3], konan:[1,2], kk:[1], mkBoker:[1,2,3], mkErev:[1,2,3] };
+function defaultSize(role){ return (ROLE_SIZES[role]&&ROLE_SIZES[role][0]) || 1; }
+
+const FIGHTERS = [
+  { id:"shlomowich", name:"שלומוביץ", role:"סמל, מכונה", isSamal:true,  active:true  },
+  { id:"maimon",     name:"מימון",    role:"סמל", isSamal:true,  active:true  },
+  { id:"barkai",     name:"ברקאי",   role:"סמל, נגב", isSamal:true,  active:true  },
+  { id:"moshe",      name:"משה",     role:"סמל", isSamal:true,  active:true  },
+  { id:"vaknin",     name:"וקנין",   role:"סמל", isSamal:false, active:false },
+  { id:"avni",       name:"אבני",    role:"סמל", isSamal:false, active:false },
+  { id:"maayan",     name:"מעיין",   role:"all around player",    isSamal:false, active:true  },
+  { id:"aviya",      name:"אביה",    role:"מתשאל",    isSamal:false, active:true  },
+  { id:"gal",        name:"גל",      role:"חובש",isSamal:false, active:true  },
+  { id:"flash",      name:"פלאש",    role:"חובש",isSamal:false, active:true  },
+  { id:"biki",       name:"בר קמה",    role:"קלע", isSamal:false, active:true  },
+  { id:"shamai",     name:"בן שמאי",    role:"קלע, מתשאל",    isSamal:false, active:true  },
+];
+
+const HISTORY = [
+  { id:1, date:"04-06.06", kk:null,   atlit:["gal","moshe"],         t23:["shamai"], mkKK:null,    blocked:[] },
+  { id:2, date:"11-13.06", kk:"full", atlit:["maimon","aviya"],      t23:["biki"],   mkKK:"avni",  blocked:[] },
+  { id:3, date:"18-20.06", kk:null,   atlit:["shlomowich","maayan"], t23:["vaknin"], mkKK:null,    blocked:[] },
+  { id:4, date:"25-27.06", kk:"full", atlit:["barkai","gal"],        t23:["maimon"], mkKK:"moshe", blocked:[] },
+];
+
+// ---- state ----
+let fighters = FIGHTERS.slice();
+let history = HISTORY.slice();
+let view = "main";
+let isAdmin = false;
+let kkType = "full";
+let nextDate = "";
+let blocked = [];
+let toast = null;
+let pwd = "";
+let pwdErr = false;
+let loaded = false;
+
+// localStorage fallback (works even if Firebase is down)
+var localVersion = 0, cloudVersion = 0, pendingLocalWrite = false;
+function saveLocal(){
+  try { localStorage.setItem("rotationData", JSON.stringify({fighters:fighters, history:history, version:localVersion, pending:pendingLocalWrite})); } catch(e){}
+}
+function loadLocal(){
+  try {
+    var raw = localStorage.getItem("rotationData");
+    if(raw){ var d=JSON.parse(raw); if(d.fighters) fighters=d.fighters; if(d.history) history=d.history; if(d.version) localVersion=d.version; if(d.pending) pendingLocalWrite=true; return true; }
+  } catch(e){}
+  return false;
+}
+// manual overrides for confirm screen: null = use suggestion, else id
+let mAtlit1 = null, mAtlit2 = null, mT23 = null, mMkKK = null;
+// editing history week id (null = none)
+let editId = null;
+// flexible closure builder: list of slots being built
+// each: {role:"atlit", people:[id,...]}
+let bSlots = [];
+let bDate = "";
+let bKonanActivated = false;  // for konan-bait closures
+let bIsOp = false, bOpSize = null; // when editing an op closure
+// replace modal: weekId, role ("atlit"/"t23"/"mkKK"), and the id being replaced
+let replaceCtx = null;
+let whyCtx = null; // {sIdx, pIdx} - showing full ranking explanation for a slot
+let statsExpanded = {}; // fighter id -> bool, show full detail in stats
+// operational closure builder
+let opDate = "";
+let opSize = "full";        // full | sat_morning | sat_evening | fri
+let opPeople = [];          // selected fighter ids
+
+// ---- firebase sync ----
+// Force-update ONLY the fighters roster from the code's FIGHTERS constant,
+// preserving all history/closures. Useful after changing names/tags in code.
+function syncFightersFromCode(){
+  fighters = FIGHTERS.map(function(f){ return Object.assign({}, f); });
+  // preserve active/inactive state that may have been changed in the app? No - code is source of truth here.
+  pushToCloud();
+  showToast("\u05E8\u05E9\u05D9\u05DE\u05EA \u05D4\u05DC\u05D5\u05D7\u05DE\u05D9\u05DD \u05E2\u05D5\u05D3\u05DB\u05E0\u05D4");
+  render();
+}
+
+function pushToCloud() {
+  // every push bumps the version so cloud always reflects the newest writer.
+  // ensure strictly-increasing (never equal to a previous value)
+  var v = Date.now();
+  if(v <= localVersion) v = localVersion + 1;
+  localVersion = v;
+  pendingLocalWrite = true;   // mark BEFORE the async write
+  saveLocal();
+  if(!fbOK || !DOC){ return; }
+  try {
+    DOC.set({ fighters: fighters, history: history, version: localVersion })
+       .then(function(){ cloudVersion = localVersion; /* keep pending until snapshot confirms this version */ })
+       .catch(function(e){ console.error("save error", e); pendingLocalWrite = true; });
+  } catch(e){ console.error("save error", e); pendingLocalWrite = true; }
+}
+
+// Connect to Firebase using compat SDK (works in all browsers, no modules)
+var _fbTries = 0;
+function connectFirebase(){
+  try {
+    if(typeof firebase === "undefined" || !firebase.firestore){
+      _fbTries++;
+      if(_fbTries <= 60){ setTimeout(connectFirebase, 300); return; } // retry up to ~18s
+      console.warn("Firebase SDK not loaded after retries, local only");
+      return;
+    }
+    if(fbOK) return; // already connected
+    if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
+    db = firebase.firestore();
+    DOC = db.collection("rotation").doc("main");
+    fbOK = true;
+    DOC.onSnapshot(function(snap){
+      if(snap.exists){
+        var data = snap.data();
+        var incomingVer = data.version || 0;
+        // If the incoming data is OUR OWN write (same version) or older, and we have
+        // pending local changes, keep our local data. Clear pending once cloud caught up.
+        if(incomingVer >= localVersion){
+          // cloud is at or ahead of us -> accept it as the source of truth
+          if(data.fighters) fighters = data.fighters;
+          if(data.history) history = data.history;
+          cloudVersion = incomingVer;
+          localVersion = incomingVer;
+          pendingLocalWrite = false;
+          saveLocal();
+        } else {
+          // incoming cloud data is OLDER than our local version -> our changes are newer.
+          // Do NOT overwrite. Re-push our version so the cloud catches up.
+          if(pendingLocalWrite){
+            pushToCloud();
+          }
+          loaded = true; render();
+          return;
+        }
+      } else {
+        // cloud empty -> seed it with whatever we have locally
+        pushToCloud();
+      }
+      loaded = true;
+      render();
+    }, function(err){
+      console.error("snapshot error", err);
+    });
+  } catch(e) {
+    console.error("Firebase connect failed, using local data", e);
+    fbOK = false;
+  }
+}
+
+// ---- logic ----
+function endDateOf(s){
+  try{
+    var p=s.split("."); var dd=p[0].split("-"); var last=parseInt(dd[dd.length-1],10);
+    return new Date(2026, parseInt(p[1],10)-1, last, 23,59,59);
+  }catch(e){ return null; }
+}
+function isPast(s){ var d=endDateOf(s); return d ? d.getTime()<Date.now() : false; }
+
+function calcCounts(hist){
+  var c={};
+  fighters.forEach(function(f){ c[f.id]={total:0,atlit:0,t23:0,sadat:0,konan:0,kk:0,mkKK:0,mkutz:0,op:0,opMorning:0,opEvening:0,mkBoker:0,mkErev:0}; });
+  (hist||[]).forEach(function(w){
+    if(!w) return;
+    if(w.type==="op"){
+      (w.people||[]).forEach(function(id){
+        if(!c[id]) return;
+        c[id].op++;
+        if(w.opSize==="full"){ c[id].total++; }
+        if(w.opSize==="sat_morning"){ c[id].opMorning++; }
+        if(w.opSize==="sat_evening"){ c[id].opEvening++; }
+      });
+      return;
+    }
+    // flexible slots model (also handles legacy via weekSlots)
+    weekSlots(w).forEach(function(sl){
+      var rdef = ROLES[sl.role] || {counts:true};
+      (sl.people||[]).forEach(function(id){
+        if(!c[id]) return;
+        // per-role tally
+        if(c[id][sl.role]!==undefined) c[id][sl.role]++;
+        if(sl.role==="kk") c[id].mkKK++;   // keep legacy alias
+        // does it count toward total fairness?
+        if(sl.role==="kk"){
+          // kk: full counts, mkutz doesn't (tracked separately)
+          if((sl.kkType||"full")==="full"){ c[id].total++; }
+          else { c[id].mkutz++; }
+        } else if(sl.role==="konan"){
+          // konan bait: counts ONLY if activated (פעילות התרחשה)
+          if(w.konanActivated){ c[id].total++; }
+        } else if(sl.role==="mkBoker"){
+          c[id].opMorning++;  // tracked as early-morning return, NOT a closure
+        } else if(sl.role==="mkErev"){
+          c[id].opEvening++;  // tracked as early-evening return, NOT a closure
+        } else if(rdef.counts){
+          c[id].total++;
+        }
+      });
+    });
+  });
+  return c;
+}
+function lastMkutz(hist){
+  var s=hist.slice().sort(function(a,b){return b.id-a.id;});
+  for(var i=0;i<s.length;i++){
+    var sl=weekSlots(s[i]).filter(function(x){return x.role==="kk"&&(x.kkType||"full")==="mkutz";})[0];
+    if(sl) return sl.people[0];
+    if(i===0) break; // only check the most recent week
+  }
+  return null;
+}
+// Returns who closed the single most-recent weekend in a given history list
+function prevWeekendIds(hist){
+  var s=hist.slice().sort(function(a,b){var da=endDateOf(a.date),db=endDateOf(b.date);return (db?db.getTime():0)-(da?da.getTime():0);});
+  if(s.length===0) return [];
+  var w=s[0];
+  if(w.type==="op") return (w.people||[]).slice();
+  // only people who ACTUALLY closed count as "closed last weekend".
+  // konan-bait people who were NOT activated did not really close -> excluded.
+  var ids=[];
+  weekSlots(w).forEach(function(sl){
+    if(sl.role==="konan" && !w.konanActivated) return; // skip non-activated konan
+    if(sl.role==="mkBoker" || sl.role==="mkErev") return; // mkutzeret is not closing
+    ids=ids.concat(sl.people);
+  });
+  return ids;
+}
+// Returns who returned EARLY (sat morning/evening) in the most recent op - they should rest next weekend
+function earlyReturnIds(hist){
+  var s=hist.slice().sort(function(a,b){var da=endDateOf(a.date),db=endDateOf(b.date);return (db?db.getTime():0)-(da?da.getTime():0);});
+  for(var i=0;i<s.length;i++){
+    var w=s[i];
+    if(w.type==="op" && (w.opSize==="sat_morning"||w.opSize==="sat_evening")){
+      return (w.people||[]).slice();
+    }
+    // stop at the most recent weekend-level event
+    if(i===0) continue;
+  }
+  // simpler: just check the single most recent op-early
+  var recent = s.filter(function(w){return w.type==="op"&&(w.opSize==="sat_morning"||w.opSize==="sat_evening");});
+  return recent.length? (recent[0].people||[]).slice() : [];
+}
+
+// Recommend ranked candidates for ONE slot of a given role.
+// hist = closures to count from. taken = ids already placed in THIS closure. avoid = recent-weekend ids.
+function recommendForSlot(hist, role, taken, avoid){
+  var counts=calcCounts(hist);
+  var needsSamal = ROLES[role] && ROLES[role].needsSamal;
+  var pool=fighters.filter(function(f){
+    if(!f.active) return false;
+    if(taken.indexOf(f.id)!==-1) return false;
+    if(blocked.indexOf(f.id)!==-1) return false;
+    return true;
+  });
+  var reserveSamal = !needsSamal; // for non-atlit roles, prefer non-samal on ties
+  pool.sort(function(a,b){
+    var t=counts[a.id].total-counts[b.id].total;        // EQUALITY first, always
+    if(t!==0) return t;
+    var ra=avoid.indexOf(a.id)!==-1?1:0, rb=avoid.indexOf(b.id)!==-1?1:0;
+    if(ra!==rb) return ra-rb;                             // avoid back-to-back
+    if(reserveSamal){ var sa=a.isSamal?1:0,sb=b.isSamal?1:0; if(sa!==sb) return sa-sb; } // keep samals for צ צפון
+    return (counts[a.id][role]||0)-(counts[b.id][role]||0); // variety in role
+  });
+  // if role needs a samal and none taken yet is a samal, force samal to top
+  if(needsSamal){
+    var hasSamal = taken.some(function(id){ return F(id)&&F(id).isSamal; });
+    if(!hasSamal){
+      var samals=pool.filter(function(f){return f.isSamal;});
+      var rest=pool.filter(function(f){return !f.isSamal;});
+      pool=samals.concat(rest);
+    }
+  }
+  return pool;
+}
+
+// Build a human-readable reason string for why a fighter is ranked where they are.
+function slotReason(f, hist, role, avoid){
+  var counts=calcCounts(hist);
+  var c=counts[f.id]||{total:0};
+  var parts=[];
+  // total closures - the main fairness signal
+  parts.push(c.total+" \u05E1\u05D2\u05D9\u05E8\u05D5\u05EA \u05D1\u05E1\u05D4\u05F4\u05DB");
+  // recently closed?
+  if(avoid.indexOf(f.id)!==-1){ parts.push("\u05E1\u05D2\u05E8 \u05DC\u05D0\u05D7\u05E8\u05D5\u05E0\u05D4 \u2014 \u05E2\u05D3\u05D9\u05E3 \u05DC\u05E0\u05D5\u05D7"); }
+  else { parts.push("\u05DC\u05D0 \u05E1\u05D2\u05E8 \u05D1\u05E1\u05D5\u05E4\u05F4\u05E9 \u05D4\u05D0\u05D7\u05E8\u05D5\u05DF"); }
+  // samal reservation note
+  if(ROLES[role] && !ROLES[role].needsSamal && f.isSamal){
+    parts.push("\u05E1\u05DE\u05DC \u2014 \u05E2\u05D3\u05D9\u05E3 \u05DC\u05E9\u05DE\u05D5\u05E8 \u05DC\u05E6 \u05E6\u05E4\u05D5\u05DF");
+  }
+  // role variety
+  var inRole=c[role]||0;
+  if(inRole>0) parts.push("\u05E2\u05E9\u05D4 "+inRole+" \u05E4\u05E2\u05DE\u05D9\u05DD \u05D1\u05EA\u05E4\u05E7\u05D9\u05D3 \u05D6\u05D4");
+  // mkutzeret / early returns
+  var shorts=(c.mkutz||0)+(c.opMorning||0)+(c.opEvening||0);
+  if(shorts>0) parts.push(shorts+" \u05DE\u05E7\u05D5\u05E6\u05E8\u05D5\u05EA/\u05D7\u05D6\u05E8\u05D5\u05EA \u05DE\u05D5\u05E7\u05D3\u05DE\u05D5\u05EA");
+  return parts;
+}
+
+// short one-liner reason (most important signal)
+function slotReasonShort(f, hist, role, avoid){
+  var counts=calcCounts(hist);
+  var c=counts[f.id]||{total:0};
+  var bits=[c.total+" \u05E1\u05D2\u05D9\u05E8\u05D5\u05EA"];
+  if(avoid.indexOf(f.id)!==-1) bits.push("\u05E1\u05D2\u05E8 \u05DC\u05D0\u05D7\u05E8\u05D5\u05E0\u05D4");
+  return bits.join(" \u00B7 ");
+}
+
+function buildSug(hist, recentIds){
+  recentIds = recentIds || [];
+  var counts=calcCounts(hist), prev=lastMkutz(hist);
+  var pool=fighters.filter(function(f){return f.active&&blocked.indexOf(f.id)===-1;});
+  function recentPenalty(id){ return recentIds.indexOf(id)!==-1 ? 100 : 0; }
+
+  // RULE 1 (always): fewest TOTAL closures wins -> full equality, samal or not.
+  // RULE 2 (tiebreak only): avoid recent weekend.
+  // RULE 3 (tiebreak only): for צ23 / כ"כ, prefer NON-samal (keep samals for צ צפון).
+  // RULE 4 (tiebreak only): fewest in that specific role.
+  function sorter(roleKey, reserveSamal){
+    return function(a,b){
+      var ta = counts[a.id].total, tb = counts[b.id].total;
+      if(ta !== tb) return ta - tb;                       // equality first, above everything
+      var r = recentPenalty(a.id) - recentPenalty(b.id);
+      if(r !== 0) return r;                                // then avoid back-to-back
+      if(reserveSamal){                                    // then keep samals for צ צפון
+        var sa = a.isSamal?1:0, sb = b.isSamal?1:0;
+        if(sa !== sb) return sa - sb;                      // non-samal (0) before samal (1)
+      }
+      return (counts[a.id][roleKey]||0) - (counts[b.id][roleKey]||0); // then fewest in role
+    };
+  }
+
+  // Assign צ צפון FIRST so a samal is reserved there (needs >=1 samal)
+  var s1=pool.filter(function(f){return f.isSamal;}).sort(sorter("atlit", false))[0];
+  var s2=pool.filter(function(f){return f.id!==(s1&&s1.id);}).sort(sorter("atlit", false))[0];
+  // צ23 - prefer non-samal on ties
+  var afterAtlit=pool.filter(function(f){return f.id!==(s1&&s1.id)&&f.id!==(s2&&s2.id);});
+  var t23=afterAtlit.slice().sort(sorter("t23", true))[0];
+  // כ"כ - prefer non-samal on ties; mkutzeret-last-week penalty as tiebreak on equal totals
+  var mk=null;
+  if(kkType!=="none"){
+    var kp=pool.filter(function(f){return f.id!==(s1&&s1.id)&&f.id!==(s2&&s2.id)&&f.id!==(t23&&t23.id);});
+    kp.sort(function(a,b){
+      var ta = counts[a.id].total, tb = counts[b.id].total;
+      if(ta !== tb) return ta - tb;
+      var pa = (a.id===prev?0.5:0), pb=(b.id===prev?0.5:0);
+      if(pa !== pb) return pa - pb;
+      var r = recentPenalty(a.id) - recentPenalty(b.id);
+      if(r !== 0) return r;
+      var sa = a.isSamal?1:0, sb=b.isSamal?1:0;
+      if(sa !== sb) return sa - sb;
+      return (counts[a.id].mkKK||0) - (counts[b.id].mkKK||0);
+    });
+    mk=kp[0]||null;
+  }
+  return { atlit:[s1&&s1.id,s2&&s2.id].filter(Boolean), t23:[t23&&t23.id].filter(Boolean), mkKK:mk?mk.id:null };
+}
+function F(id){ return fighters.find(function(f){return f.id===id;}); }
+
+// Convert any closure to a uniform list of slots [{role, people:[]}]
+function weekSlots(w){
+  if(!w) return [];
+  // new flexible model - but validate each slot has people array
+  if(w.slots && Array.isArray(w.slots)){
+    return w.slots.filter(function(sl){ return sl && sl.role; }).map(function(sl){
+      return { role:sl.role, people:Array.isArray(sl.people)?sl.people.filter(Boolean):[], kkType:sl.kkType };
+    });
+  }
+  // legacy model -> build slots from old fields
+  var s=[];
+  if(w.atlit && w.atlit.length) s.push({role:"atlit", people:w.atlit.filter(Boolean)});
+  if(w.t23 && w.t23.length)     s.push({role:"t23",   people:w.t23.filter(Boolean)});
+  if(w.mkKK)                    s.push({role:"kk",     people:[w.mkKK], kkType:w.kk||"full"});
+  return s;
+}
+// All people in a closure (regular or op)
+function weekPeople(w){
+  if(!w) return [];
+  if(w.type==="op") return Array.isArray(w.people)?w.people.filter(Boolean):[];
+  var ids=[];
+  weekSlots(w).forEach(function(sl){ ids=ids.concat(sl.people); });
+  return ids;
+}
+
+// Ranked replacement candidates for a slot in a planned week
+function replacementCandidates(week, role, oldId){
+  // count closures from everything EXCEPT this week (so the person leaving isn't double counted)
+  var others = history.filter(function(x){ return x.id!==week.id; });
+  var counts = calcCounts(others);
+  // who closes the weekend immediately before this one
+  var before = history.filter(function(x){ var d=endDateOf(x.date), wd=endDateOf(week.date); return d&&wd&&d.getTime()<wd.getTime(); });
+  var recent = prevWeekendIds(before);
+  // people already in THIS week (can't double-book)
+  var inWeek = weekPeople(week);
+  // eligible pool: active, not already in this week (except the one being replaced), and not blocked
+  var pool = fighters.filter(function(f){
+    if(!f.active) return false;
+    if(f.id===oldId) return false;
+    if(inWeek.indexOf(f.id)!==-1) return false;
+    return true;
+  });
+  // role constraint: if this is a samal-requiring role (atlit), and no other samal is in that slot, force samal
+  if(ROLES[role] && ROLES[role].needsSamal){
+    var slot = weekSlots(week).filter(function(sl){return sl.role===role;})[0];
+    var otherSamal = slot && slot.people.some(function(id){ return id!==oldId && F(id) && F(id).isSamal; });
+    if(!otherSamal){ pool = pool.filter(function(f){ return f.isSamal; }); }
+  }
+  // sort: EQUALITY first (fewest total), then avoid-recent, then reserve-samal for non-atlit, then fewest in role
+  var roleKey = role==="mkKK" ? "kk" : role;
+  var reserveSamal = !(ROLES[role] && ROLES[role].needsSamal);
+  pool.sort(function(a,b){
+    var t = counts[a.id].total - counts[b.id].total;
+    if(t!==0) return t;                                    // equality above all
+    var ra = recent.indexOf(a.id)!==-1?1:0, rb = recent.indexOf(b.id)!==-1?1:0;
+    if(ra!==rb) return ra-rb;                              // avoid back-to-back
+    if(reserveSamal){
+      var sa=a.isSamal?1:0, sb=b.isSamal?1:0;
+      if(sa!==sb) return sa-sb;                            // keep samals for צ צפון
+    }
+    return (counts[a.id][roleKey]||0) - (counts[b.id][roleKey]||0);
+  });
+  return pool;
+}
+
+function doReplace(newId){
+  if(!replaceCtx) return;
+  var wid=replaceCtx.weekId, role=replaceCtx.role, oldId=replaceCtx.oldId;
+  history=history.map(function(w){
+    if(w.id!==wid) return w;
+    var slots = weekSlots(w).map(function(sl){
+      return { role:sl.role, people:sl.people.map(function(id){return id===oldId?newId:id;}), kkType:sl.kkType };
+    });
+    var nw=Object.assign({},w,{slots:slots});
+    delete nw.atlit; delete nw.t23; delete nw.mkKK; delete nw.kk;
+    return nw;
+  });
+  replaceCtx=null;
+  pushToCloud();
+  showToast("\u05D4\u05D7\u05DC\u05E4\u05D4 \u05D1\u05D5\u05E6\u05E2\u05D4");
+  render();
+}
+
+// Operational closure: ranked recommendation of who is best to send (fairness first)
+function opRecommendation(){
+  var counts=calcCounts(history);
+  var avoid = prevWeekendIds(history).concat(earlyReturnIds(history));
+  var pool=fighters.filter(function(f){return f.active;});
+  pool.sort(function(a,b){
+    var t=counts[a.id].total-counts[b.id].total;     // equality first
+    if(t!==0) return t;
+    var ra=avoid.indexOf(a.id)!==-1?1:0, rb=avoid.indexOf(b.id)!==-1?1:0;
+    if(ra!==rb) return ra-rb;                          // avoid recent
+    return 0;
+  });
+  return pool;
+}
+function toggleOpPerson(id){
+  opPeople = opPeople.indexOf(id)!==-1 ? opPeople.filter(function(x){return x!==id;}) : opPeople.concat([id]);
+  render();
+}
+function saveOp(){
+  if(!opDate){ showToast("\u05D4\u05DB\u05E0\u05E1 \u05EA\u05D0\u05E8\u05D9\u05DA"); return; }
+  if(opPeople.length===0){ showToast("\u05D1\u05D7\u05E8 \u05DC\u05D5\u05D7\u05DE\u05D9\u05DD"); return; }
+  var w={ id:Date.now(), type:"op", date:opDate, opSize:opSize, people:opPeople.slice() };
+  history=history.concat([w]);
+  opDate=""; opSize="full"; opPeople=[];
+  pushToCloud();
+  showToast("\u05E4\u05F4 \u05DE\u05D1\u05E6\u05E2\u05D9\u05EA \u05E0\u05E9\u05DE\u05E8\u05D4");
+  view="planned"; render();
+}
+
+// ---- actions ----
+function showToast(m){ toast=m; render(); setTimeout(function(){toast=null;render();},2500); }
+function tryLogin(){ if(pwd===PWD){isAdmin=true;view="main";pwd="";render();} else {pwdErr=true;pwd="";render();setTimeout(function(){pwdErr=false;render();},1500);} }
+function effectiveSug(){
+  // count everything already scheduled (past + planned), and avoid whoever closes the latest existing weekend
+  var existing = editId!==null ? history.filter(function(x){return x.id!==editId;}) : history;
+  var s=buildSug(existing, prevWeekendIds(existing).concat(earlyReturnIds(existing)));
+  var a1 = mAtlit1!==null ? mAtlit1 : s.atlit[0];
+  var a2 = mAtlit2!==null ? mAtlit2 : s.atlit[1];
+  var t  = mT23!==null ? mT23 : s.t23[0];
+  var m  = kkType==="none" ? null : (mMkKK!==null ? mMkKK : s.mkKK);
+  return { atlit:[a1,a2].filter(Boolean), t23:[t].filter(Boolean), mkKK:m };
+}
+function saveWeek(){
+  if(!nextDate) return;
+  var es=effectiveSug();
+  if(editId!==null){
+    history=history.map(function(x){ return x.id===editId ? {id:editId,date:nextDate,kk:kkType==="none"?null:kkType,atlit:es.atlit,t23:es.t23,mkKK:es.mkKK,blocked:blocked.slice()} : x; });
+  } else {
+    var w={id:Date.now(),date:nextDate,kk:kkType==="none"?null:kkType,atlit:es.atlit,t23:es.t23,mkKK:es.mkKK,blocked:blocked.slice()};
+    history=history.concat([w]);
+  }
+  blocked=[]; nextDate=""; kkType="none"; editId=null;
+  mAtlit1=null; mAtlit2=null; mT23=null; mMkKK=null;
+  pushToCloud();
+  showToast("סגירה נשמרה");
+  view="planned"; render();
+}
+function editWeek(id){
+  var w=history.find(function(x){return x.id===id;});
+  if(!w) return;
+  editId=id; bDate=w.date;
+  bKonanActivated = !!w.konanActivated;
+  if(w.type==="op"){
+    // operational closure: preserve as op, but let user add mkutzeret slots.
+    // map the op people into the matching role so nothing is lost.
+    bIsOp = true; bOpSize = w.opSize || "full";
+    var opRole = (w.opSize==="sat_morning") ? "mkBoker" : (w.opSize==="sat_evening") ? "mkErev" : "t23";
+    bSlots = [{ role:opRole, people:(w.people||[]).slice() }];
+  } else {
+    bIsOp = false; bOpSize = null;
+    bSlots = weekSlots(w).map(function(sl){ return {role:sl.role, people:sl.people.slice(), kkType:sl.kkType||"full"}; });
+  }
+  blocked=(w.blocked||[]).slice();
+  view="build"; render();
+}
+
+// ---- flexible builder ----
+function ensureBuilderReady(){
+  // initialize the flexible builder with a sensible default for the next free weekend
+  editId=null; bKonanActivated=false; bIsOp=false; bOpSize=null;
+  if(!bDate) bDate = nextFreeWeekend();
+  bSlots = [ {role:"t23",people:[]} ];
+  autoFillBuild();
+}
+function newBuild(){
+  editId=null; bDate=nextFreeWeekend(); bKonanActivated=false; bIsOp=false; bOpSize=null; blocked=[];
+  bSlots=[ {role:"t23",people:[]} ];
+  autoFillBuild();
+  view="build"; render();
+}
+function bAvoid(){
+  var ex = editId!==null ? history.filter(function(x){return x.id!==editId;}) : history;
+  // find the closure immediately BEFORE the date we're currently building (bDate),
+  // so multi-week-ahead planning avoids the correct preceding weekend
+  var target = endDateOf(bDate);
+  if(target){
+    var before = ex.filter(function(x){ var d=endDateOf(x.date); return d && d.getTime() < target.getTime(); });
+    if(before.length){
+      return prevWeekendIds(before).concat(earlyReturnIds(before));
+    }
+  }
+  return prevWeekendIds(ex).concat(earlyReturnIds(ex));
+}
+function bHist(){
+  var ex = editId!==null ? history.filter(function(x){return x.id!==editId;}) : history;
+  // count closures up to the date being built (past + planned-before),
+  // exclude closures planned for AFTER this date (they shouldn't penalize anyone yet)
+  var target = endDateOf(bDate);
+  if(target){
+    return ex.filter(function(x){ var d=endDateOf(x.date); return !d || d.getTime() <= target.getTime(); });
+  }
+  return ex;
+}
+// fill empty people in slots with the recommended next-in-line
+function autoFillBuild(){
+  var taken=[];
+  bSlots.forEach(function(sl){ sl.people.forEach(function(p){ if(p) taken.push(p); }); });
+  bSlots.forEach(function(sl){
+    var want = sl.people.length>0 ? sl.people.length : defaultSize(sl.role);
+    // only autofill if completely empty
+    if(sl.people.filter(Boolean).length===0){
+      var rec=recommendForSlot(bHist(), sl.role, taken, bAvoid());
+      sl.people=[];
+      for(var i=0;i<want && i<rec.length;i++){ sl.people.push(rec[i].id); taken.push(rec[i].id); }
+    } else {
+      sl.people.forEach(function(p){ if(p) taken.push(p); });
+    }
+  });
+}
+function addSlot(role){
+  var n=defaultSize(role);
+  var ppl=[]; for(var i=0;i<n;i++) ppl.push(null);
+  var sl={role:role, people:ppl, kkType:(role==="kk"?"full":undefined)};
+  bSlots.push(sl);
+  // auto-recommend fill for the new slot
+  var taken=[];
+  bSlots.forEach(function(s){ s.people.forEach(function(p){ if(p) taken.push(p); }); });
+  var rec=recommendForSlot(bHist(), role, taken, bAvoid());
+  for(var j=0;j<n && j<rec.length;j++){ sl.people[j]=rec[j].id; }
+  render();
+}
+function removeSlot(idx){ bSlots.splice(idx,1); render(); }
+function addPersonToSlot(idx){
+  bSlots[idx].people.push(null); render();
+}
+function setSlotSize(sIdx, n){
+  var sl=bSlots[sIdx];
+  var cur=sl.people.length;
+  if(n>cur){
+    // add empty spots and auto-recommend fill
+    var taken=[];
+    bSlots.forEach(function(s){ s.people.forEach(function(p){ if(p) taken.push(p); }); });
+    var rec=recommendForSlot(bHist(), sl.role, taken, bAvoid());
+    var ri=0;
+    while(sl.people.length<n){
+      // pick next recommended not already used
+      var pick=null;
+      while(ri<rec.length){ if(taken.indexOf(rec[ri].id)===-1){ pick=rec[ri].id; ri++; break; } ri++; }
+      sl.people.push(pick); if(pick) taken.push(pick);
+    }
+  } else if(n<cur){
+    sl.people = sl.people.slice(0,n);
+  }
+  render();
+}
+function removePersonFromSlot(sIdx, pIdx){
+  bSlots[sIdx].people.splice(pIdx,1); render();
+}
+function setSlotPerson(sIdx, pIdx, id){
+  bSlots[sIdx].people[pIdx] = id || null; render();
+}
+function setSlotKkType(sIdx, t){ bSlots[sIdx].kkType=t; render(); }
+function recommendSlotPerson(sIdx, pIdx){
+  // pick best available for this slot, excluding everyone already placed
+  var taken=[];
+  bSlots.forEach(function(sl,i){ sl.people.forEach(function(p,j){ if(p && !(i===sIdx&&j===pIdx)) taken.push(p); }); });
+  var rec=recommendForSlot(bHist(), bSlots[sIdx].role, taken, bAvoid());
+  if(rec.length){ bSlots[sIdx].people[pIdx]=rec[0].id; render(); }
+}
+function saveBuild(){
+  if(!bDate){ showToast("\u05D4\u05DB\u05E0\u05E1 \u05EA\u05D0\u05E8\u05D9\u05DA"); return; }
+  // clean slots: drop empty people, drop empty slots
+  var slots = bSlots.map(function(sl){
+    return { role:sl.role, people:sl.people.filter(Boolean), kkType:sl.kkType };
+  }).filter(function(sl){ return sl.people.length>0; });
+  if(slots.length===0){ showToast("\u05D1\u05D7\u05E8 \u05DC\u05E4\u05D7\u05D5\u05EA \u05DC\u05D5\u05D7\u05DD \u05D0\u05D7\u05D3"); return; }
+  var hasKonan = slots.some(function(sl){return sl.role==="konan";});
+  var w={ id: (editId!==null?editId:Date.now()), date:bDate, slots:slots, blocked:blocked.slice() };
+  if(hasKonan) w.konanActivated = bKonanActivated;
+  if(editId!==null){
+    history=history.map(function(x){ return x.id===editId ? w : x; });
+  } else {
+    history=history.concat([w]);
+  }
+  editId=null; bSlots=[]; bDate=""; blocked=[]; bKonanActivated=false;
+  pushToCloud();
+  showToast("\u05E0\u05E9\u05DE\u05E8");
+  view="planned"; render();
+}
+
+// Find the next Thursday-Saturday weekend that has no closure yet, return as "DD-DD.MM"
+function nextFreeWeekend(){
+  // collect existing end-dates
+  var taken = {};
+  history.forEach(function(w){ var d=endDateOf(w.date); if(d) taken[d.toDateString()]=true; });
+  // start from today, find Thursdays going forward
+  var cur = new Date();
+  cur.setHours(0,0,0,0);
+  for(var i=0;i<120;i++){
+    var day = new Date(cur.getTime() + i*86400000);
+    if(day.getDay()===4){ // Thursday
+      var sat = new Date(day.getTime() + 2*86400000); // Saturday
+      sat.setHours(23,59,59,0);
+      if(!taken[sat.toDateString()]){
+        var dd=function(n){ return (n<10?"0":"")+n; };
+        var mm=dd(day.getMonth()+1);
+        return dd(day.getDate())+"-"+dd(sat.getDate())+"."+mm;
+      }
+    }
+  }
+  return "";
+}
+
+// Approve the current recommendation directly into planned closures
+function quickApprove(){
+  var es=effectiveSug();
+  var date=nextFreeWeekend();
+  if(!date){ showToast("\u05DC\u05D0 \u05E0\u05DE\u05E6\u05D0 \u05EA\u05D0\u05E8\u05D9\u05DA \u05E4\u05E0\u05D5\u05D9"); return; }
+  var slots=[];
+  if(es.atlit.length) slots.push({role:"atlit", people:es.atlit.slice()});
+  if(es.t23.length) slots.push({role:"t23", people:es.t23.slice()});
+  if(kkType!=="none" && es.mkKK) slots.push({role:"kk", people:[es.mkKK], kkType:kkType});
+  var w={id:Date.now(),date:date,slots:slots,blocked:blocked.slice()};
+  history=history.concat([w]);
+  blocked=[]; kkType="full";
+  mAtlit1=null; mAtlit2=null; mT23=null; mMkKK=null;
+  pushToCloud();
+  showToast("\u05E0\u05D5\u05E1\u05E3 \u05DC\u05DE\u05EA\u05D5\u05DB\u05E0\u05E0\u05D5\u05EA: "+date);
+  view="planned"; render();
+}
+function deleteWeek(id){ history=history.filter(function(x){return x.id!==id;}); pushToCloud(); render(); }
+function confirmDelete(id){
+  var w=history.find(function(x){return x.id===id;});
+  var label = w ? w.date : "";
+  if(window.confirm("\u05DC\u05DE\u05D7\u05D5\u05E7 \u05D0\u05EA \u05D4\u05E1\u05D2\u05D9\u05E8\u05D4 "+label+"?")){
+    deleteWeek(id);
+    showToast("\u05D4\u05E1\u05D2\u05D9\u05E8\u05D4 \u05E0\u05DE\u05D7\u05E7\u05D4");
+  }
+}
+function toggleBlocked(id){ blocked = blocked.indexOf(id)!==-1 ? blocked.filter(function(x){return x!==id;}) : blocked.concat([id]); render(); }
+function toggleActive(id){ fighters=fighters.map(function(f){return f.id===id?Object.assign({},f,{active:!f.active}):f;}); pushToCloud(); render(); }
+function cycleKK(){ var cy=["none","full","mkutz"]; kkType=cy[(cy.indexOf(kkType)+1)%3]; render(); }
+function setView(v){ view=v; render(); }
+
+// expose for inline handlers
+window.__a = { tryLogin, saveWeek, deleteWeek, confirmDelete, editWeek, quickApprove, syncFightersFromCode,
+  openReplace:function(wid,role,oldId){ replaceCtx={weekId:wid,role:role,oldId:oldId}; render(); },
+  closeReplace:function(){ replaceCtx=null; render(); },
+  doReplace:doReplace,
+  setOpDate:function(v){opDate=v;}, setOpSize:function(v){opSize=v;render();},
+  toggleOpPerson:toggleOpPerson, saveOp:saveOp,
+  openOp:function(){opDate="";opSize="full";opPeople=[];view="op";render();}, toggleBlocked, toggleActive, cycleKK, setView,
+  setPwd:function(v){pwd=v;}, setDate:function(v){nextDate=v;}, setKK:function(v){kkType=v;render();},
+  logout:function(){isAdmin=false;render();}, clearBlocked:function(){blocked=[];render();},
+  onPwdKey:function(e){ if(e.key==="Enter") tryLogin(); },
+  setAtlit1:function(v){mAtlit1=v||null;render();}, setAtlit2:function(v){mAtlit2=v||null;render();},
+  setT23:function(v){mT23=v||null;render();}, setMkKK:function(v){mMkKK=v||null;render();},
+  newWeek:newBuild,
+  cancelEdit:function(){editId=null;bSlots=[];bDate="";blocked=[];view="planned";render();},
+  setBDate:function(v){bDate=v;}, addSlot:addSlot, removeSlot:removeSlot,
+  addPersonToSlot:addPersonToSlot, removePersonFromSlot:removePersonFromSlot,
+  setSlotPerson:setSlotPerson, setSlotKkType:setSlotKkType,
+  recommendSlotPerson:recommendSlotPerson, saveBuild:saveBuild, setSlotSize:setSlotSize,
+  openWhy:function(s,p){ whyCtx={sIdx:s,pIdx:p}; render(); },
+  toggleStat:function(id){ statsExpanded[id]=!statsExpanded[id]; render(); },
+  closeWhy:function(){ whyCtx=null; render(); },
+  pickFromWhy:function(id){ if(whyCtx){ setSlotPerson(whyCtx.sIdx, whyCtx.pIdx, id); whyCtx=null; render(); } },
+  autoFill:function(){ autoFillBuild(); render(); },
+  toggleKonanActivated:function(id){
+    // toggle whether a planned/past konan-bait closure was activated
+    history=history.map(function(w){ return w.id===id ? Object.assign({},w,{konanActivated:!w.konanActivated}) : w; });
+    pushToCloud(); render();
+  } };
+
+// ---- rendering ----
+function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+function kkLabelOf(t){ return t==="full"?"כ״כ מלא":t==="mkutz"?"מקוצרת":"אין כ״כ"; }
+
+function render(){
+  try { _render(); }
+  catch(e){
+    console.error("render error", e);
+    var r=document.getElementById("root");
+    if(r) r.innerHTML='<div style="color:#f87171;padding:24px;text-align:center;font-family:system-ui;">\u05E9\u05D2\u05D9\u05D0\u05D4 \u05D1\u05D8\u05E2\u05D9\u05E0\u05D4.<br><br><span style="color:#71717a;font-size:13px;">'+esc(String(e&&e.message||e))+'</span></div>';
+  }
+}
+function _render(){
+  var root=document.getElementById("root");
+  if(!loaded){ root.innerHTML='<div style="color:#71717a;padding:40px;text-align:center;">טוען נתונים...</div>'; return; }
+
+  if(view==="lock"){ renderLock(root); return; }
+
+  var pastWeeks=history.filter(function(w){return isPast(w.date);});
+  var plannedWeeks=history.filter(function(w){return !isPast(w.date);});
+  var counts=calcCounts(pastWeeks);
+  var prev=lastMkutz(pastWeeks);
+  var recentAvoid = prevWeekendIds(history).concat(earlyReturnIds(history));
+  var sug=buildSug(history, recentAvoid);
+  var active=fighters.filter(function(f){return f.active;});
+
+  var adminTabs = isAdmin?["blocked","confirm"]:[];
+  var tabs=["main"].concat(adminTabs).concat(["planned","history","stats","forecast"]);
+  var tabLabel={main:"ראשי",blocked:"בקשצים",confirm:"אישור",planned:"מתוכננות",forecast:"תחזית",history:"היסטוריה",stats:"סטטוס"};
+
+  var html='';
+  // toast
+  if(toast) html+='<div style="position:fixed;top:16px;left:50%;transform:translateX(-50%);background:#059669;color:white;padding:8px 20px;border-radius:999px;font-size:14px;z-index:50;white-space:nowrap;">'+esc(toast)+'</div>';
+
+  // header
+  html+='<div style="background:#18181b;border-bottom:1px solid #27272a;padding:16px;">';
+  html+='<div style="max-width:640px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;">';
+  html+='<div><h1 style="font-size:20px;font-weight:bold;margin:0;color:white;">סבב סגירות</h1>';
+  html+='<p style="color:#71717a;font-size:12px;margin:2px 0 0;">'+active.length+' לוחמים פעילים</p></div>';
+  if(isAdmin) html+='<button onclick="__a.logout()" style="background:#27272a;border:1px solid #3f3f46;color:#a1a1aa;padding:6px 12px;border-radius:8px;font-size:12px;cursor:pointer;">יציאה</button>';
+  else html+='<button onclick="__a.setView(\'lock\')" style="background:#27272a;border:1px solid #3f3f46;color:#71717a;padding:6px 12px;border-radius:8px;font-size:12px;cursor:pointer;">עריכה</button>';
+  html+='</div></div>';
+
+  // nav
+  html+='<div style="background:rgba(24,24,27,0.95);border-bottom:1px solid #27272a;position:sticky;top:0;z-index:10;">';
+  html+='<div style="max-width:640px;margin:0 auto;display:flex;">';
+  tabs.forEach(function(t){
+    var act=view===t;
+    html+='<button onclick="__a.setView(\''+t+'\')" style="flex:1;padding:12px 4px;font-size:12px;font-weight:500;background:none;border:none;border-bottom:'+(act?"2px solid #fbbf24":"2px solid transparent")+';color:'+(act?"white":"#71717a")+';cursor:pointer;">'+tabLabel[t];
+    if(t==="blocked"&&blocked.length>0) html+='<span style="margin-right:4px;background:#ef4444;color:white;font-size:11px;border-radius:999px;padding:1px 5px;">'+blocked.length+'</span>';
+    html+='</button>';
+  });
+  html+='</div></div>';
+
+  // content
+  html+='<div style="max-width:640px;margin:0 auto;padding:20px 16px;">';
+
+  if(view==="main") html+=renderMain(counts,prev,sug,plannedWeeks);
+  if(view==="blocked"&&isAdmin) html+=renderBlocked();
+  if(view==="confirm"&&isAdmin){ if(bSlots.length===0&&editId===null) ensureBuilderReady(); html+=renderBuild(counts); }
+  if(view==="planned") html+=renderWeeks(plannedWeeks.slice().sort(function(a,b){ var da=endDateOf(a.date),db=endDateOf(b.date); return (da?da.getTime():0)-(db?db.getTime():0); }),counts,true);
+  if(view==="history") html+=renderWeeks(pastWeeks.slice().sort(function(a,b){ var da=endDateOf(a.date),db=endDateOf(b.date); return (db?db.getTime():0)-(da?da.getTime():0); }),counts,false);
+  if(view==="build"&&isAdmin){ if(bSlots.length===0&&editId===null) ensureBuilderReady(); html+=renderBuild(counts); }
+  if(view==="op"&&isAdmin) html+=renderOp(counts);
+  if(view==="forecast") html+=renderForecast();
+  if(view==="stats") html+=renderStats(counts);
+
+  html+='</div>';
+
+  // replace modal overlay
+  if(replaceCtx){
+    var rw = history.find(function(x){return x.id===replaceCtx.weekId;});
+    if(rw){
+      var roleLabel = replaceCtx.role==="atlit" ? "\u05E6 \u05E6\u05E4\u05D5\u05DF" : replaceCtx.role==="t23" ? "\u05E6\u05F423" : "\u05DE\u05E4\u05E7\u05D3 \u05DB\u05F4\u05DB";
+      var oldName = F(replaceCtx.oldId) ? F(replaceCtx.oldId).name : replaceCtx.oldId;
+      var cands = replacementCandidates(rw, replaceCtx.role, replaceCtx.oldId);
+      var rc = calcCounts(history.filter(function(x){return x.id!==rw.id;}));
+      html+='<div onclick="__a.closeReplace()" style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;display:flex;align-items:flex-end;justify-content:center;">';
+      html+='<div onclick="event.stopPropagation()" style="background:#18181b;border-radius:16px 16px 0 0;border:1px solid #27272a;padding:20px;width:100%;max-width:640px;max-height:80vh;overflow-y:auto;">';
+      html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;"><h3 style="margin:0;font-size:16px;color:white;">\u05D4\u05D7\u05DC\u05E4\u05EA '+esc(oldName)+'</h3><button onclick="__a.closeReplace()" style="background:none;border:none;color:#71717a;font-size:22px;cursor:pointer;">\u00D7</button></div>';
+      html+='<p style="color:#71717a;font-size:12px;margin:0 0 16px;">'+esc(rw.date)+' \u00B7 '+roleLabel+' \u00B7 \u05DE\u05D5\u05DE\u05DC\u05E5 \u05DC\u05DE\u05E2\u05DC\u05D4</p>';
+      if(cands.length===0) html+='<p style="color:#52525b;font-size:14px;">\u05D0\u05D9\u05DF \u05DE\u05D7\u05DC\u05D9\u05E3 \u05D6\u05DE\u05D9\u05DF</p>';
+      cands.forEach(function(f, i){
+        var best = i===0;
+        var onc = "__a.doReplace('"+f.id+"')";
+        html+='<button onclick="'+onc+'" style="width:100%;display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:10px;border:1px solid '+(best?"#059669":"#3f3f46")+';background:'+(best?"rgba(5,150,105,0.15)":"rgba(39,39,42,0.4)")+';margin-bottom:8px;cursor:pointer;text-align:right;box-sizing:border-box;">';
+        if(best) html+='<span style="font-size:11px;color:#34d399;background:rgba(5,150,105,0.25);padding:2px 8px;border-radius:999px;font-weight:bold;">\u05DE\u05D5\u05DE\u05DC\u05E5</span>';
+        html+='<span style="font-size:15px;font-weight:500;color:white;">'+esc(f.name)+'</span>';
+        if(f.isSamal) html+='<span style="font-size:11px;color:#71717a;">\u05E1\u05DE\u05DC</span>';
+        html+='<span style="margin-right:auto;font-size:12px;color:#a1a1aa;font-family:monospace;">'+(rc[f.id]?rc[f.id].total:0)+' \u05E1\u05D2\u05D9\u05E8\u05D5\u05EA</span>';
+        html+='</button>';
+      });
+      html+='</div></div>';
+    }
+  }
+
+  // "why recommended" modal - full ranking with reasons for a slot
+  if(whyCtx && bSlots[whyCtx.sIdx]){
+    var wsl=bSlots[whyCtx.sIdx];
+    var taken=[];
+    bSlots.forEach(function(s,i){ s.people.forEach(function(p,j){ if(p && !(i===whyCtx.sIdx&&j===whyCtx.pIdx)) taken.push(p); }); });
+    var av=bAvoid();
+    var ranked=recommendForSlot(bHist(), wsl.role, taken, av);
+    var rdef=ROLES[wsl.role]||{label:wsl.role,color:"#a1a1aa"};
+    var curId=wsl.people[whyCtx.pIdx];
+    html+='<div onclick="__a.closeWhy()" style="position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:100;display:flex;align-items:flex-end;justify-content:center;">';
+    html+='<div onclick="event.stopPropagation()" style="background:#18181b;border-radius:16px 16px 0 0;border:1px solid #27272a;padding:20px;width:100%;max-width:640px;max-height:85vh;overflow-y:auto;">';
+    html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;"><h3 style="margin:0;font-size:16px;color:'+rdef.color+';">\u05D3\u05D9\u05E8\u05D5\u05D2 \u05DC'+rdef.label+'</h3><button onclick="__a.closeWhy()" style="background:none;border:none;color:#71717a;font-size:22px;cursor:pointer;">\u00D7</button></div>';
+    html+='<p style="color:#71717a;font-size:12px;margin:0 0 16px;">\u05DE\u05D3\u05D5\u05E8\u05D2 \u05DC\u05E4\u05D9: \u05E9\u05D5\u05D5\u05D9\u05D5\u05DF \u05E1\u05D2\u05D9\u05E8\u05D5\u05EA \u2190 \u05D4\u05D9\u05DE\u05E0\u05E2\u05D5\u05EA \u05DE\u05E8\u05E6\u05E3 \u2190 \u05E9\u05DE\u05D9\u05E8\u05EA \u05E1\u05DE\u05DC\u05D9\u05DD \u2190 \u05D2\u05D9\u05D5\u05D5\u05DF</p>';
+    ranked.slice(0,8).forEach(function(f,i){
+      var best=i===0, isCur=f.id===curId;
+      var reasons=slotReason(f, bHist(), wsl.role, av);
+      html+='<button onclick="__a.pickFromWhy(\''+f.id+'\')" style="width:100%;text-align:right;background:'+(isCur?"rgba(37,99,235,0.15)":best?"rgba(5,150,105,0.12)":"rgba(39,39,42,0.4)")+';border:1px solid '+(isCur?"#2563eb":best?"#059669":"#3f3f46")+';border-radius:10px;padding:12px 14px;margin-bottom:8px;cursor:pointer;box-sizing:border-box;">';
+      html+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">';
+      html+='<span style="font-size:13px;color:#52525b;font-family:monospace;width:18px;">'+(i+1)+'</span>';
+      html+='<span style="font-size:15px;font-weight:600;color:white;">'+esc(f.name)+'</span>';
+      if(f.isSamal) html+='<span style="font-size:11px;color:#71717a;">\u05E1\u05DE\u05DC</span>';
+      if(best) html+='<span style="font-size:10px;color:#34d399;background:rgba(5,150,105,0.25);padding:2px 8px;border-radius:999px;font-weight:bold;">\u05DE\u05D5\u05DE\u05DC\u05E5</span>';
+      if(isCur) html+='<span style="font-size:10px;color:#93c5fd;background:rgba(37,99,235,0.25);padding:2px 8px;border-radius:999px;">\u05E0\u05D1\u05D7\u05E8</span>';
+      html+='</div>';
+      html+='<div style="font-size:12px;color:#a1a1aa;line-height:1.7;">';
+      reasons.forEach(function(r){ html+='\u2022 '+esc(r)+'<br>'; });
+      html+='</div></button>';
+    });
+    html+='</div></div>';
+  }
+
+  root.innerHTML=html;
+
+  // rebind inputs (since innerHTML wipes them)
+  var di=document.getElementById("dateInput");
+  if(di) di.oninput=function(e){ __a.setDate(e.target.value); };
+  var odi=document.getElementById("opDateInput");
+  if(odi) odi.oninput=function(e){ __a.setOpDate(e.target.value); };
+  var sA1=document.getElementById("selA1"); if(sA1) sA1.onchange=function(e){__a.setAtlit1(e.target.value);};
+  var sA2=document.getElementById("selA2"); if(sA2) sA2.onchange=function(e){__a.setAtlit2(e.target.value);};
+  var sT=document.getElementById("selT23"); if(sT) sT.onchange=function(e){__a.setT23(e.target.value);};
+  var sM=document.getElementById("selMk"); if(sM) sM.onchange=function(e){__a.setMkKK(e.target.value);};
+  var bdi=document.getElementById("bDateInput");
+  if(bdi) bdi.oninput=function(e){ __a.setBDate(e.target.value); };
+  // bind all builder slot dropdowns: ids like bsel_<sIdx>_<pIdx>
+  document.querySelectorAll('select[id^="bsel_"]').forEach(function(sel){
+    sel.onchange=function(e){
+      var parts=sel.id.split("_"); // ["bsel", sIdx, pIdx]
+      __a.setSlotPerson(parseInt(parts[1],10), parseInt(parts[2],10), e.target.value);
+    };
+  });
+  var pi=document.getElementById("pwdInput");
+  if(pi){ pi.oninput=function(e){__a.setPwd(e.target.value);}; pi.onkeydown=function(e){__a.onPwdKey(e);}; }
+}
+
+function renderLock(root){
+  var h='<div style="min-height:100vh;background:#09090b;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;">';
+  h+='<div style="font-size:48px;margin-bottom:16px;">🔒</div>';
+  h+='<h2 style="color:white;font-weight:bold;font-size:18px;margin:0 0 8px;">מצב עריכה</h2>';
+  h+='<p style="color:#71717a;font-size:14px;margin-bottom:24px;">הכנס סיסמה כדי לערוך</p>';
+  h+='<div style="width:100%;max-width:280px;">';
+  h+='<input id="pwdInput" type="password" value="'+esc(pwd)+'" placeholder="סיסמה..." style="width:100%;background:#27272a;border:1px solid '+(pwdErr?"#ef4444":"#3f3f46")+';border-radius:8px;padding:12px;color:white;font-size:14px;outline:none;text-align:center;box-sizing:border-box;margin-bottom:8px;">';
+  if(pwdErr) h+='<p style="color:#f87171;font-size:12px;text-align:center;margin:0 0 8px;">סיסמה שגויה</p>';
+  h+='<button onclick="__a.tryLogin()" style="width:100%;padding:10px;background:#f59e0b;border-radius:8px;font-weight:bold;font-size:14px;border:none;cursor:pointer;color:#1c1917;">כניסה</button>';
+  h+='</div></div>';
+  root.innerHTML=h;
+  var pi=document.getElementById("pwdInput");
+  if(pi){ pi.oninput=function(e){__a.setPwd(e.target.value);}; pi.onkeydown=function(e){__a.onPwdKey(e);}; pi.focus(); }
+}
+
+function rowFighter(id,counts,kind){
+  var f=F(id); if(!f) return '';
+  var col=kind==="atlit"?"#10b981":kind==="t23"?"#3b82f6":kind==="mkfull"?"#f59e0b":"#a855f7";
+  var cnt=kind==="atlit"?(counts[id]?counts[id].atlit:0):kind==="t23"?(counts[id]?counts[id].t23:0):(counts[id]?counts[id].mkKK:0);
+  var h='<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">';
+  h+='<span style="width:8px;height:8px;border-radius:50%;background:'+col+';flex-shrink:0;display:inline-block;"></span>';
+  h+='<span style="font-size:14px;font-weight:500;color:white;">'+esc(f.name)+'</span>';
+  if(kind==="atlit"&&f.isSamal) h+='<span style="font-size:11px;color:#71717a;">סמל</span>';
+  h+='<span style="margin-right:auto;font-size:11px;color:#52525b;">'+cnt+'x</span>';
+  h+='</div>';
+  return h;
+}
+
+function plannedCard(w, title, accent){
+  if(!w) return '';
+  // operational closure card (simpler)
+  if(w.type==="op"){
+    var opL={full:"\u05E1\u05D2\u05D9\u05E8\u05D4 \u05DE\u05DC\u05D0\u05D4",sat_morning:"\u05D7\u05D6\u05E8\u05D4 \u05E9\u05D1\u05EA \u05D1\u05D5\u05E7\u05E8",sat_evening:"\u05D7\u05D6\u05E8\u05D4 \u05E9\u05D1\u05EA \u05E2\u05E8\u05D1",fri:"\u05D9\u05E6\u05D9\u05D0\u05D4 \u05E9\u05D9\u05E9\u05D9"};
+    var oh='<div style="background:#18181b;border-radius:12px;border:1px solid #b45309;padding:16px;margin-bottom:12px;">';
+    oh+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">';
+    oh+='<span style="font-weight:600;font-size:13px;color:#fbbf24;">\u05E4\u05F4 \u05DE\u05D1\u05E6\u05E2\u05D9\u05EA \u00B7 '+title+'</span>';
+    oh+='<span style="font-weight:bold;font-size:13px;color:white;">'+esc(w.date)+'</span></div>';
+    oh+='<div style="font-size:13px;color:#fcd34d;margin-bottom:6px;">'+(opL[w.opSize]||w.opSize)+'</div>';
+    oh+='<div style="font-size:14px;color:white;">'+esc((w.people||[]).map(function(id){return F(id)?F(id).name:id;}).join(", "))+'</div></div>';
+    return oh;
+  }
+  var h='<div style="background:#18181b;border-radius:12px;border:1px solid '+accent+';padding:16px;margin-bottom:12px;">';
+  h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
+  h+='<span style="font-weight:600;font-size:13px;color:'+accent+';">'+title+'</span>';
+  h+='<span style="font-weight:bold;font-size:13px;color:white;">'+esc(w.date)+'</span>';
+  h+='</div><div style="font-size:14px;color:white;">';
+  weekSlots(w).forEach(function(sl){
+    var rdef=ROLES[sl.role]||{label:sl.role,color:"#a1a1aa"};
+    var lbl=rdef.label; if(sl.role==="kk") lbl=(sl.kkType==="mkutz")?"\u05DE\u05E7\u05D5\u05E6\u05E8\u05EA":"\u05DE\u05E4\u05E7\u05D3 \u05DB\u05F4\u05DB";
+    h+='<div style="display:flex;gap:8px;margin-bottom:6px;"><span style="color:'+rdef.color+';font-size:12px;width:75px;flex-shrink:0;">'+lbl+'</span><span>'+esc(sl.people.map(function(id){return F(id)?F(id).name:id;}).join(", "))+'</span></div>';
+  });
+  h+='</div></div>';
+  return h;
+}
+
+function renderMain(counts,prev,sug,plannedWeeks){
+  var h='';
+  // upcoming planned closures (sorted by date)
+  var sortedPlanned = plannedWeeks.slice().sort(function(a,b){ var da=endDateOf(a.date),db=endDateOf(b.date); return (da?da.getTime():0)-(db?db.getTime():0); });
+  if(sortedPlanned.length>0){
+    h+=plannedCard(sortedPlanned[0], "\u05D4\u05E1\u05D5\u05E4\u05F4\u05E9 \u05D4\u05E7\u05E8\u05D5\u05D1", "#fbbf24");
+    if(sortedPlanned[1]) h+=plannedCard(sortedPlanned[1], "\u05D4\u05E1\u05D5\u05E4\u05F4\u05E9 \u05D4\u05D1\u05D0", "#71717a");
+    h+='<div style="height:8px;"></div>';
+  }
+  // flexible builder embedded (ADMIN ONLY) - recommends next weekend
+  if(isAdmin){
+    // ensure builder is initialized for the next free weekend
+    if(bSlots.length===0 && editId===null){ ensureBuilderReady(); }
+    h+=renderBuild(counts);
+  }
+
+  // fighters list
+  h+='<div style="background:#18181b;border-radius:12px;border:1px solid #27272a;padding:16px;">';
+  h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><p style="font-weight:600;font-size:14px;margin:0;color:white;">לוחמים</p>';
+  if(isAdmin) h+='<button onclick="__a.syncFightersFromCode()" style="font-size:11px;padding:4px 10px;border-radius:8px;border:1px solid #3f3f46;background:#27272a;color:#a1a1aa;cursor:pointer;">עדכן שמות/תגים</button>';
+  h+='</div>';
+  var fightersSorted = fighters.slice().sort(function(a,b){ if(a.active!==b.active) return a.active?-1:1; return 0; });
+  fightersSorted.forEach(function(f){
+    h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;border:1px solid '+(f.active?"#3f3f46":"#27272a")+';background:'+(f.active?"rgba(39,39,42,0.5)":"rgba(24,24,27,0.3)")+';margin-bottom:6px;opacity:'+(f.active?1:0.5)+';">';
+    if(isAdmin) h+='<button onclick="__a.toggleActive(\''+f.id+'\')" style="width:16px;height:16px;border-radius:4px;border:1px solid '+(f.active?"#10b981":"#52525b")+';background:'+(f.active?"#10b981":"transparent")+';display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;color:white;font-size:11px;padding:0;">'+(f.active?"v":"")+'</button>';
+    h+='<span style="font-size:14px;font-weight:500;color:'+(f.active?"white":"#52525b")+';">'+esc(f.name)+'</span>';
+    if(f.role) h+='<span style="font-size:11px;color:#71717a;background:#27272a;padding:2px 6px;border-radius:4px;">'+esc(f.role)+'</span>';
+    if(f.id===prev) h+='<span style="font-size:11px;color:#d8b4fe;background:rgba(88,28,135,0.3);padding:2px 6px;border-radius:4px;border:1px solid rgba(107,33,168,0.5);">מקוצרת</span>';
+    if(blocked.indexOf(f.id)!==-1) h+='<span style="font-size:11px;color:#f87171;background:rgba(127,29,29,0.3);padding:2px 6px;border-radius:4px;border:1px solid rgba(153,27,27,0.5);">בקשץ</span>';
+    h+='<span style="margin-right:auto;font-size:12px;color:#52525b;font-family:monospace;">'+(counts[f.id]?counts[f.id].total:0)+'</span>';
+    h+='</div>';
+  });
+  h+='</div>';
+  return h;
+}
+
+function renderBlocked(){
+  var h='<div><div style="background:#18181b;border-radius:12px;border:1px solid #27272a;padding:16px;margin-bottom:12px;">';
+  h+='<h2 style="font-weight:600;margin:0 0 4px;color:white;">בקשצים לסגירה הבאה</h2>';
+  h+='<p style="color:#71717a;font-size:12px;margin:0 0 16px;">מי שמסומן לא ייכנס לסגירה הבאה</p>';
+  fighters.filter(function(f){return f.active;}).forEach(function(f){
+    var bl=blocked.indexOf(f.id)!==-1;
+    h+='<button onclick="__a.toggleBlocked(\''+f.id+'\')" style="width:100%;display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:8px;border:1px solid '+(bl?"#991b1b":"#3f3f46")+';background:'+(bl?"rgba(127,29,29,0.4)":"rgba(39,39,42,0.4)")+';margin-bottom:8px;cursor:pointer;text-align:right;box-sizing:border-box;">';
+    h+='<div style="width:20px;height:20px;border-radius:4px;border:2px solid '+(bl?"#ef4444":"#52525b")+';background:'+(bl?"#ef4444":"transparent")+';display:flex;align-items:center;justify-content:center;flex-shrink:0;color:white;font-size:12px;font-weight:bold;">'+(bl?"X":"")+'</div>';
+    h+='<span style="font-size:14px;font-weight:500;color:'+(bl?"#fca5a5":"white")+';">'+esc(f.name)+'</span>';
+    if(bl) h+='<span style="margin-right:auto;font-size:12px;color:#f87171;">לא סוגר</span>';
+    h+='</button>';
+  });
+  if(blocked.length>0) h+='<button onclick="__a.clearBlocked()" style="background:none;border:none;color:#71717a;font-size:12px;cursor:pointer;text-decoration:underline;margin-top:8px;">נקה הכל</button>';
+  h+='</div><button onclick="__a.setView(\'main\')" style="width:100%;padding:10px;background:#27272a;color:white;border-radius:8px;font-size:14px;border:none;cursor:pointer;">חזור</button></div>';
+  return h;
+}
+
+function fighterOptions(selectedId){
+  var opts='';
+  fighters.filter(function(f){return f.active;}).forEach(function(f){
+    opts+='<option value="'+f.id+'"'+(f.id===selectedId?' selected':'')+'>'+esc(f.name)+(f.isSamal?' (\u05E1\u05DE\u05DC)':'')+'</option>';
+  });
+  return opts;
+}
+
+function renderConfirm(sug){
+  var es=effectiveSug();
+  var selFill='width:100%;background:#27272a;border:1px solid #3f3f46;border-radius:8px;padding:8px 12px;color:white;font-size:14px;outline:none;box-sizing:border-box;';
+  var h='<div style="background:#18181b;border-radius:12px;border:1px solid #27272a;padding:16px;">';
+  h+='<h2 style="font-weight:600;margin:0 0 16px;color:white;">'+(editId!==null?"\u05E2\u05E8\u05D9\u05DB\u05EA \u05E1\u05D2\u05D9\u05E8\u05D4":"\u05D0\u05D9\u05E9\u05D5\u05E8 \u05E1\u05D2\u05D9\u05E8\u05D4")+'</h2>';
+  // date
+  h+='<div style="margin-bottom:16px;"><label style="font-size:12px;color:#a1a1aa;display:block;margin-bottom:4px;">\u05EA\u05D0\u05E8\u05D9\u05DA</label>';
+  h+='<input id="dateInput" type="text" value="'+esc(nextDate)+'" placeholder="25-27.06" style="'+selFill+'"></div>';
+  // kk type
+  h+='<div style="margin-bottom:16px;"><label style="font-size:12px;color:#a1a1aa;display:block;margin-bottom:8px;">\u05E1\u05D5\u05D2 \u05DB\u05F4\u05DB</label><div style="display:flex;gap:8px;">';
+  [["none","\u05D0\u05D9\u05DF"],["full","\u05DB\u05F4\u05DB \u05DE\u05DC\u05D0"],["mkutz","\u05DE\u05E7\u05D5\u05E6\u05E8\u05EA"]].forEach(function(it){
+    var t=it[0],l=it[1],sel=kkType===t;
+    var bg=sel?(t==="full"?"rgba(120,53,15,0.5)":t==="mkutz"?"rgba(88,28,135,0.5)":"#3f3f46"):"#27272a";
+    var bc=sel?(t==="full"?"#b45309":t==="mkutz"?"#7e22ce":"#52525b"):"#3f3f46";
+    var co=sel?(t==="full"?"#fcd34d":t==="mkutz"?"#d8b4fe":"white"):"#71717a";
+    h+='<button onclick="__a.setKK(\''+t+'\')" style="flex:1;padding:8px 4px;border-radius:8px;font-size:12px;font-weight:500;border:1px solid '+bc+';background:'+bg+';color:'+co+';cursor:pointer;">'+l+'</button>';
+  });
+  h+='</div></div>';
+  // manual assignment section
+  h+='<div style="background:rgba(39,39,42,0.5);border-radius:8px;padding:12px;border:1px solid #3f3f46;margin-bottom:16px;">';
+  h+='<p style="font-size:12px;color:#a1a1aa;margin:0 0 12px;font-weight:500;">\u05E9\u05D9\u05D1\u05D5\u05E5 (\u05DE\u05D5\u05DE\u05DC\u05E5 \u05D0\u05D5\u05D8\u05D5\u05DE\u05D8\u05D9\u05EA, \u05E0\u05D9\u05EA\u05DF \u05DC\u05E9\u05E0\u05D5\u05EA):</p>';
+  // צ צפון 1
+  h+='<div style="margin-bottom:8px;"><label style="font-size:11px;color:#34d399;display:block;margin-bottom:2px;">\u05E6 \u05E6\u05E4\u05D5\u05DF (1)</label>';
+  h+='<select id="selA1" style="'+selFill+'">'+fighterOptions(es.atlit[0])+'</select></div>';
+  // צ צפון 2
+  h+='<div style="margin-bottom:8px;"><label style="font-size:11px;color:#34d399;display:block;margin-bottom:2px;">\u05E6 \u05E6\u05E4\u05D5\u05DF (2)</label>';
+  h+='<select id="selA2" style="'+selFill+'">'+fighterOptions(es.atlit[1])+'</select></div>';
+  // צ23
+  h+='<div style="margin-bottom:8px;"><label style="font-size:11px;color:#60a5fa;display:block;margin-bottom:2px;">\u05E6\u05F423</label>';
+  h+='<select id="selT23" style="'+selFill+'">'+fighterOptions(es.t23[0])+'</select></div>';
+  // mkKK
+  if(kkType!=="none"){
+    h+='<div><label style="font-size:11px;color:'+(kkType==="full"?"#fcd34d":"#d8b4fe")+';display:block;margin-bottom:2px;">'+(kkType==="mkutz"?"\u05DE\u05E7\u05D5\u05E6\u05E8\u05EA":"\u05DE\u05E4\u05E7\u05D3 \u05DB\u05F4\u05DB")+'</label>';
+    h+='<select id="selMk" style="'+selFill+'">'+fighterOptions(es.mkKK)+'</select></div>';
+  }
+  h+='</div>';
+  // buttons
+  h+='<button onclick="__a.saveWeek()" style="width:100%;padding:10px;background:'+(nextDate?"#059669":"#27272a")+';color:'+(nextDate?"white":"#52525b")+';border-radius:8px;font-size:14px;font-weight:bold;border:none;cursor:'+(nextDate?"pointer":"default")+';margin-bottom:8px;">'+(nextDate?(editId!==null?"\u05E9\u05DE\u05D5\u05E8 \u05E9\u05D9\u05E0\u05D5\u05D9\u05D9\u05DD":"\u05E9\u05DE\u05D5\u05E8 \u05E1\u05D2\u05D9\u05E8\u05D4"):"\u05D4\u05DB\u05E0\u05E1 \u05EA\u05D0\u05E8\u05D9\u05DA")+'</button>';
+  h+='<button onclick="__a.cancelEdit()" style="width:100%;padding:8px;background:#27272a;color:#a1a1aa;border-radius:8px;font-size:13px;border:none;cursor:pointer;">\u05D1\u05D9\u05D8\u05D5\u05DC</button>';
+  h+='</div>';
+  return h;
+}
+function renderWeeks(weeks,counts,planned){
+  var h='<div>';
+  h+='<h2 style="font-weight:600;margin:0 0 4px;color:white;">'+(planned?"סגירות מתוכננות":"היסטוריה")+'</h2>';
+  if(planned) h+='<p style="color:#71717a;font-size:12px;margin:0 0 12px;">סגירות שאושרו קדימה. יעברו להיסטוריה אוטומטית אחרי שיעברו</p>';
+  if(planned&&isAdmin){
+    h+='<div style="display:flex;gap:8px;margin-bottom:12px;">';
+    h+='<button onclick="__a.newWeek()" style="flex:1;padding:10px;background:#f59e0b;color:#1c1917;border-radius:8px;font-size:13px;font-weight:bold;border:none;cursor:pointer;">+ סגירת בט״ש</button>';
+    h+='<button onclick="__a.openOp()" style="flex:1;padding:10px;background:#b45309;color:white;border-radius:8px;font-size:13px;font-weight:bold;border:none;cursor:pointer;">+ פ״ מבצעית</button>';
+    h+='</div>';
+  }
+  else h+='<div style="height:8px;"></div>';
+  if(weeks.length===0) h+='<div style="background:#18181b;border-radius:12px;border:1px solid #27272a;padding:24px;text-align:center;"><p style="color:#52525b;font-size:14px;margin:0;">'+(planned?"אין סגירות מתוכננות":"אין היסטוריה")+'</p></div>';
+  weeks.forEach(function(w){
+    // ---- OPERATIONAL CLOSURE card ----
+    if(w.type==="op"){
+      var opLabels={full:"סגירה מלאה",sat_morning:"חזרה שבת בוקר",sat_evening:"חזרה שבת ערב",fri:"יציאה שישי"};
+      h+='<div style="background:#18181b;border-radius:12px;border:1px solid #b45309;padding:16px;margin-bottom:12px;">';
+      h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
+      h+='<span style="font-weight:bold;font-size:14px;color:#fbbf24;">פ״ מבצעית · '+esc(w.date)+'</span><div style="display:flex;gap:6px;align-items:center;">';
+      h+='<span style="font-size:11px;color:#fcd34d;background:rgba(120,53,15,0.4);border:1px solid rgba(146,64,14,0.5);padding:2px 8px;border-radius:999px;">'+(opLabels[w.opSize]||w.opSize)+'</span>';
+      if(isAdmin) h+='<button onclick="__a.confirmDelete('+w.id+')" style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#f87171;font-size:12px;cursor:pointer;padding:3px 8px;">מחק</button>';
+      h+='</div></div>';
+      h+='<div style="font-size:14px;color:white;"><span style="color:#fbbf24;font-size:12px;">משתתפים: </span>'+esc((w.people||[]).map(function(id){return F(id)?F(id).name:id;}).join(", "))+'</div>';
+      h+='</div>';
+      return;
+    }
+    // ---- regular BTASH closure card ----
+    h+='<div style="background:#18181b;border-radius:12px;border:1px solid '+(planned?"#3f3f46":"#27272a")+';padding:16px;margin-bottom:12px;">';
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">';
+    h+='<span style="font-weight:bold;font-size:14px;color:'+(planned?"#fbbf24":"white")+';">'+esc(w.date)+'</span><div style="display:flex;gap:6px;align-items:center;">';
+    if(w.kk==="full") h+='<span style="font-size:11px;color:#fcd34d;background:rgba(120,53,15,0.4);border:1px solid rgba(146,64,14,0.5);padding:2px 8px;border-radius:999px;">כ״כ מלא</span>';
+    if(w.kk==="mkutz") h+='<span style="font-size:11px;color:#d8b4fe;background:rgba(88,28,135,0.4);border:1px solid rgba(107,33,168,0.5);padding:2px 8px;border-radius:999px;">מקוצרת</span>';
+    if(w.blocked&&w.blocked.length>0) h+='<span style="font-size:11px;color:#f87171;background:rgba(127,29,29,0.4);border:1px solid rgba(153,27,27,0.5);padding:2px 8px;border-radius:999px;">'+w.blocked.length+' בקשצ</span>';
+    if(isAdmin) h+='<button onclick="__a.editWeek('+w.id+')" style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#60a5fa;font-size:12px;cursor:pointer;padding:3px 8px;">\u05E2\u05E8\u05D5\u05DA</button>';
+    if(isAdmin) h+='<button onclick="__a.confirmDelete('+w.id+')" style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#f87171;font-size:12px;cursor:pointer;padding:3px 8px;">\u05DE\u05D7\u05E7</button>';
+    h+='</div></div><div style="font-size:14px;color:white;">';
+    var canReplace = planned && isAdmin;
+    function nameWithBtn(id, role){
+      var nm = F(id)?F(id).name:id;
+      var s = '<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px;white-space:nowrap;">'+esc(nm);
+      if(canReplace){
+        var onc = "__a.openReplace(" + w.id + ",'" + role + "','" + id + "')";
+        s += '<button onclick="'+onc+'" style="background:none;border:1px solid #3f3f46;border-radius:5px;color:#fbbf24;font-size:10px;cursor:pointer;padding:1px 5px;">\u05D4\u05D7\u05DC\u05E3</button>';
+      }
+      s += '</span>';
+      return s;
+    }
+    weekSlots(w).forEach(function(sl){
+      var rdef=ROLES[sl.role]||{label:sl.role,color:"#a1a1aa"};
+      var lbl=rdef.label; if(sl.role==="kk") lbl=(sl.kkType==="mkutz")?"\u05de\u05e7\u05d5\u05e6\u05e8\u05ea":"\u05de\u05e4\u05e7\u05d3 \u05db\u05f4\u05db";
+      h+='<div style="display:flex;gap:8px;margin-bottom:6px;align-items:center;flex-wrap:wrap;"><span style="color:'+rdef.color+';font-size:12px;width:75px;flex-shrink:0;">'+lbl+'</span><span>'+sl.people.map(function(id){return nameWithBtn(id,sl.role);}).join("")+'</span></div>';
+    });
+    if(weekSlots(w).some(function(sl){return sl.role==="konan";})){
+      var _act=!!w.konanActivated;
+      h+='<div style="border-top:1px solid #27272a;padding-top:8px;margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:12px;color:#fb923c;">\u05db\u05d5\u05e0\u05df \u05d1\u05d9\u05ea:</span>';
+      if(isAdmin){ h+='<button onclick="__a.toggleKonanActivated('+w.id+')" style="font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid '+(_act?"#059669":"#3f3f46")+';background:'+(_act?"rgba(5,150,105,0.25)":"#27272a")+';color:'+(_act?"#34d399":"#a1a1aa")+';cursor:pointer;">'+(_act?"\u05d4\u05d9\u05ea\u05d4 \u05e4\u05e2\u05d9\u05dc\u05d5\u05ea (\u05e0\u05e1\u05e4\u05e8)":"\u05dc\u05d0 \u05d4\u05d9\u05ea\u05d4 \u05e4\u05e2\u05d9\u05dc\u05d5\u05ea")+'</button>'; }
+      else { h+='<span style="font-size:12px;color:'+(_act?"#34d399":"#71717a")+';">'+(_act?"\u05d4\u05d9\u05ea\u05d4 \u05e4\u05e2\u05d9\u05dc\u05d5\u05ea":"\u05d8\u05e8\u05dd \u05d4\u05d5\u05e4\u05e2\u05dc")+'</span>'; }
+      h+='</div>';
+    }
+    if(w.blocked&&w.blocked.length>0) h+='<div style="display:flex;gap:8px;border-top:1px solid #27272a;padding-top:6px;margin-top:4px;"><span style="color:#f87171;font-size:12px;width:70px;flex-shrink:0;">בקשצים</span><span style="color:#71717a;font-size:12px;">'+esc(w.blocked.map(function(id){return F(id)?F(id).name:id;}).join(", "))+'</span></div>';
+    h+='</div></div>';
+  });
+  h+='</div>';
+  return h;
+}
+
+function renderOp(counts){
+  var rec = opRecommendation();
+  var recRank = {}; rec.forEach(function(f,i){ recRank[f.id]=i; });
+  var avoid = prevWeekendIds(history).concat(earlyReturnIds(history));
+  var sizes = [["full","\u05E1\u05D2\u05D9\u05E8\u05D4 \u05DE\u05DC\u05D0\u05D4"],["sat_morning","\u05D7\u05D6\u05E8\u05D4 \u05E9\u05D1\u05EA \u05D1\u05D5\u05E7\u05E8"],["sat_evening","\u05D7\u05D6\u05E8\u05D4 \u05E9\u05D1\u05EA \u05E2\u05E8\u05D1"],["fri","\u05D9\u05E6\u05D9\u05D0\u05D4 \u05E9\u05D9\u05E9\u05D9"]];
+  var h='<div style="background:#18181b;border-radius:12px;border:1px solid #b45309;padding:16px;margin-bottom:12px;">';
+  h+='<h2 style="font-weight:600;margin:0 0 4px;color:#fbbf24;">\u05E4\u05F4 \u05DE\u05D1\u05E6\u05E2\u05D9\u05EA \u05D7\u05D3\u05E9\u05D4</h2>';
+  h+='<p style="color:#71717a;font-size:12px;margin:0 0 16px;">\u05E9\u05D9\u05D1\u05D5\u05E5 \u05D9\u05D3\u05E0\u05D9 \u00B7 \u05DB\u05D5\u05DC\u05DD \u05D9\u05D5\u05E6\u05D0\u05D9\u05DD \u05D1\u05D0\u05D5\u05EA\u05D5 \u05D2\u05D5\u05D3\u05DC</p>';
+  // date
+  h+='<div style="margin-bottom:16px;"><label style="font-size:12px;color:#a1a1aa;display:block;margin-bottom:4px;">\u05EA\u05D0\u05E8\u05D9\u05DA</label>';
+  h+='<input id="opDateInput" type="text" value="'+esc(opDate)+'" placeholder="25-27.06" style="width:100%;background:#27272a;border:1px solid #3f3f46;border-radius:8px;padding:8px 12px;color:white;font-size:14px;outline:none;box-sizing:border-box;"></div>';
+  // size
+  h+='<div style="margin-bottom:16px;"><label style="font-size:12px;color:#a1a1aa;display:block;margin-bottom:8px;">\u05D2\u05D5\u05D3\u05DC \u05D4\u05E1\u05D2\u05D9\u05E8\u05D4</label><div style="display:flex;gap:6px;flex-wrap:wrap;">';
+  sizes.forEach(function(it){
+    var t=it[0],l=it[1],sel=opSize===t;
+    h+='<button onclick="__a.setOpSize(\''+t+'\')" style="flex:1;min-width:45%;padding:8px 4px;border-radius:8px;font-size:12px;font-weight:500;border:1px solid '+(sel?"#b45309":"#3f3f46")+';background:'+(sel?"rgba(120,53,15,0.5)":"#27272a")+';color:'+(sel?"#fcd34d":"#71717a")+';cursor:pointer;">'+l+'</button>';
+  });
+  h+='</div>';
+  if(opSize==="full") h+='<p style="font-size:11px;color:#71717a;margin:8px 0 0;">\u05E1\u05D2\u05D9\u05E8\u05D4 \u05DE\u05DC\u05D0\u05D4 \u05E0\u05E1\u05E4\u05E8\u05EA \u05DB\u05E1\u05D2\u05D9\u05E8\u05D4 \u05E8\u05D2\u05D9\u05DC\u05D4 \u05D1\u05D0\u05D9\u05D6\u05D5\u05DF</p>';
+  else if(opSize==="sat_morning"||opSize==="sat_evening") h+='<p style="font-size:11px;color:#d8b4fe;margin:8px 0 0;">\u05D7\u05D6\u05E8\u05D4 \u05DE\u05D5\u05E7\u05D3\u05DE\u05EA - \u05DC\u05D0 \u05E0\u05E1\u05E4\u05E8\u05EA \u05DB\u05E1\u05D2\u05D9\u05E8\u05D4, \u05D0\u05DA \u05D9\u05E2\u05D3\u05D9\u05E3 \u05E9\u05DC\u05D0 \u05D9\u05E1\u05D2\u05E8\u05D5 \u05D0\u05D7\u05E8\u05D9</p>';
+  else h+='<p style="font-size:11px;color:#71717a;margin:8px 0 0;">\u05D9\u05E6\u05D9\u05D0\u05D4 \u05DE\u05D5\u05E7\u05D3\u05DE\u05EA - \u05E7\u05DC\u05D4, \u05DC\u05D0 \u05DE\u05E9\u05E4\u05D9\u05E2\u05D4 \u05E2\u05DC \u05D4\u05D0\u05D9\u05D6\u05D5\u05DF</p>';
+  h+='</div>';
+  // people picker - sorted by recommendation
+  h+='<label style="font-size:12px;color:#a1a1aa;display:block;margin-bottom:8px;">\u05D1\u05D7\u05E8 \u05DC\u05D5\u05D7\u05DE\u05D9\u05DD ('+opPeople.length+' \u05E0\u05D1\u05D7\u05E8\u05D5) \u00B7 \u05DE\u05D5\u05DE\u05DC\u05E5 \u05DC\u05DE\u05E2\u05DC\u05D4</label>';
+  rec.forEach(function(f, i){
+    var sel = opPeople.indexOf(f.id)!==-1;
+    var best = i<3;
+    h+='<button onclick="__a.toggleOpPerson(\''+f.id+'\')" style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;border:1px solid '+(sel?"#059669":"#3f3f46")+';background:'+(sel?"rgba(5,150,105,0.15)":"rgba(39,39,42,0.4)")+';margin-bottom:6px;cursor:pointer;text-align:right;box-sizing:border-box;">';
+    h+='<div style="width:18px;height:18px;border-radius:4px;border:2px solid '+(sel?"#10b981":"#52525b")+';background:'+(sel?"#10b981":"transparent")+';display:flex;align-items:center;justify-content:center;flex-shrink:0;color:white;font-size:11px;font-weight:bold;">'+(sel?"v":"")+'</div>';
+    h+='<span style="font-size:14px;font-weight:500;color:white;">'+esc(f.name)+'</span>';
+    if(f.isSamal) h+='<span style="font-size:11px;color:#71717a;">\u05E1\u05DE\u05DC</span>';
+    if(best&&!sel) h+='<span style="font-size:10px;color:#34d399;background:rgba(5,150,105,0.2);padding:1px 6px;border-radius:999px;">\u05DE\u05D5\u05DE\u05DC\u05E5</span>';
+    if(avoid.indexOf(f.id)!==-1) h+='<span style="font-size:10px;color:#f87171;">\u05E1\u05D2\u05E8 \u05DC\u05D0\u05D7\u05E8\u05D5\u05E0\u05D4</span>';
+    h+='<span style="margin-right:auto;font-size:12px;color:#a1a1aa;font-family:monospace;">'+(counts[f.id]?counts[f.id].total:0)+'</span>';
+    h+='</button>';
+  });
+  h+='<button onclick="__a.saveOp()" style="width:100%;margin-top:12px;padding:10px;background:'+((opDate&&opPeople.length>0)?"#059669":"#27272a")+';color:'+((opDate&&opPeople.length>0)?"white":"#52525b")+';border-radius:8px;font-size:14px;font-weight:bold;border:none;cursor:pointer;">\u05E9\u05DE\u05D5\u05E8 \u05E4\u05F4 \u05DE\u05D1\u05E6\u05E2\u05D9\u05EA</button>';
+  h+='<button onclick="__a.setView(\'main\')" style="width:100%;margin-top:8px;padding:8px;background:#27272a;color:#a1a1aa;border-radius:8px;font-size:13px;border:none;cursor:pointer;">\u05D1\u05D9\u05D8\u05D5\u05DC</button>';
+  h+='</div>';
+  return h;
+}
+
+function fighterOptionsB(selectedId){
+  var opts='<option value="">\u2014 \u05D1\u05D7\u05E8 \u2014</option>';
+  fighters.filter(function(f){return f.active;}).forEach(function(f){
+    opts+='<option value="'+f.id+'"'+(f.id===selectedId?' selected':'')+'>'+esc(f.name)+(f.isSamal?' (\u05E1\u05DE\u05DC)':'')+'</option>';
+  });
+  return opts;
+}
+
+function renderBuild(counts){
+  var fill='width:100%;background:#27272a;border:1px solid #3f3f46;border-radius:8px;padding:8px 12px;color:white;font-size:14px;outline:none;box-sizing:border-box;';
+  var h='<div style="background:#18181b;border-radius:12px;border:1px solid #27272a;padding:16px;">';
+  h+='<h2 style="font-weight:600;margin:0 0 4px;color:white;">'+(editId!==null?"\u05E2\u05E8\u05D9\u05DB\u05EA \u05E1\u05D2\u05D9\u05E8\u05D4":"\u05E1\u05D2\u05D9\u05E8\u05D4 \u05D7\u05D3\u05E9\u05D4")+'</h2>';
+  h+='<p style="color:#71717a;font-size:12px;margin:0 0 16px;">\u05D1\u05E0\u05D4 \u05D0\u05EA \u05D4\u05E1\u05D2\u05D9\u05E8\u05D4 \u05D7\u05D5\u05E4\u05E9\u05D9 \u00B7 \u05D4\u05DE\u05DC\u05E6\u05D4 \u05D0\u05D5\u05D8\u05D5\u05DE\u05D8\u05D9\u05EA \u05DC\u05DB\u05DC \u05DE\u05E7\u05D5\u05DD</p>';
+  // date
+  h+='<div style="margin-bottom:16px;"><label style="font-size:12px;color:#a1a1aa;display:block;margin-bottom:4px;">\u05EA\u05D0\u05E8\u05D9\u05DA</label>';
+  h+='<input id="bDateInput" type="text" value="'+esc(bDate)+'" placeholder="25-27.06" style="'+fill+'"></div>';
+  // slots
+  bSlots.forEach(function(sl, sIdx){
+    var rdef=ROLES[sl.role]||{label:sl.role,color:"#a1a1aa"};
+    h+='<div style="background:rgba(39,39,42,0.5);border:1px solid #3f3f46;border-radius:10px;padding:12px;margin-bottom:10px;">';
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">';
+    h+='<span style="font-weight:600;font-size:14px;color:'+rdef.color+';">'+rdef.label+'</span>';
+    h+='<button onclick="__a.removeSlot('+sIdx+')" style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#f87171;font-size:11px;cursor:pointer;padding:2px 8px;">\u05D4\u05E1\u05E8 \u05EA\u05E4\u05E7\u05D9\u05D3</button>';
+    h+='</div>';
+    // kk type selector for kk slots
+    if(sl.role==="kk"){
+      h+='<div style="display:flex;gap:6px;margin-bottom:8px;">';
+      [["full","\u05DB\u05F4\u05DB \u05DE\u05DC\u05D0"],["mkutz","\u05DE\u05E7\u05D5\u05E6\u05E8\u05EA"]].forEach(function(it){
+        var sel=(sl.kkType||"full")===it[0];
+        h+='<button onclick="__a.setSlotKkType('+sIdx+',\''+it[0]+'\')" style="flex:1;padding:6px;border-radius:6px;font-size:11px;border:1px solid '+(sel?"#b45309":"#3f3f46")+';background:'+(sel?"rgba(120,53,15,0.5)":"#27272a")+';color:'+(sel?"#fcd34d":"#71717a")+';cursor:pointer;">'+it[1]+'</button>';
+      });
+      h+='</div>';
+    }
+    // size stepper - choose ANY number of soldiers for this role
+    h+='<div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">';
+    h+='<span style="font-size:11px;color:#71717a;">\u05DB\u05DE\u05D5\u05EA \u05DC\u05D5\u05D7\u05DE\u05D9\u05DD:</span>';
+    h+='<button onclick="__a.setSlotSize('+sIdx+','+Math.max(1,sl.people.length-1)+')" style="width:28px;height:28px;border-radius:6px;border:1px solid #3f3f46;background:#27272a;color:'+rdef.color+';font-size:16px;cursor:pointer;padding:0;">\u2212</button>';
+    h+='<span style="font-size:15px;font-weight:600;color:white;min-width:24px;text-align:center;font-family:monospace;">'+sl.people.length+'</span>';
+    h+='<button onclick="__a.setSlotSize('+sIdx+','+(sl.people.length+1)+')" style="width:28px;height:28px;border-radius:6px;border:1px solid #3f3f46;background:#27272a;color:'+rdef.color+';font-size:16px;cursor:pointer;padding:0;">+</button>';
+    h+='</div>';
+    // people dropdowns
+    sl.people.forEach(function(pid, pIdx){
+      h+='<div style="display:flex;gap:6px;margin-bottom:2px;align-items:center;">';
+      h+='<select id="bsel_'+sIdx+'_'+pIdx+'" style="'+fill+'flex:1;">'+fighterOptionsB(pid)+'</select>';
+      h+='<button onclick="__a.recommendSlotPerson('+sIdx+','+pIdx+')" style="background:rgba(5,150,105,0.2);border:1px solid #059669;border-radius:6px;color:#34d399;font-size:11px;cursor:pointer;padding:6px 8px;white-space:nowrap;">\u05DE\u05D5\u05DE\u05DC\u05E5</button>';
+      h+='<button onclick="__a.openWhy('+sIdx+','+pIdx+')" style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#60a5fa;font-size:13px;cursor:pointer;padding:4px 9px;" title="\u05DC\u05DE\u05D4?">?</button>';
+      h+='<button onclick="__a.removePersonFromSlot('+sIdx+','+pIdx+')" style="background:none;border:1px solid #3f3f46;border-radius:6px;color:#71717a;font-size:14px;cursor:pointer;padding:4px 8px;">\u00D7</button>';
+      h+='</div>';
+      // short reason line for the currently selected person
+      if(pid){
+        var av=bAvoid();
+        h+='<div style="font-size:11px;color:#71717a;margin:0 0 6px 4px;">'+esc(slotReasonShort(F(pid),bHist(),sl.role,av))+'</div>';
+      } else {
+        h+='<div style="height:4px;"></div>';
+      }
+    });
+    h+='</div>';
+  });
+  // add-slot buttons
+  h+='<div style="margin:12px 0;"><p style="font-size:12px;color:#a1a1aa;margin:0 0 8px;">\u05D4\u05D5\u05E1\u05E3 \u05EA\u05E4\u05E7\u05D9\u05D3:</p><div style="display:flex;gap:6px;flex-wrap:wrap;">';
+  ROLE_ORDER.forEach(function(role){
+    var rdef=ROLES[role];
+    h+='<button onclick="__a.addSlot(\''+role+'\')" style="padding:6px 12px;border-radius:8px;font-size:12px;border:1px solid '+rdef.color+'66;background:'+rdef.color+'1a;color:'+rdef.color+';cursor:pointer;">+ '+rdef.label+'</button>';
+  });
+  h+='</div></div>';
+  // konan activation note (only if a konan slot exists)
+  if(bSlots.some(function(sl){return sl.role==="konan";})){
+    h+='<div style="background:rgba(120,53,15,0.2);border:1px solid rgba(146,64,14,0.4);border-radius:8px;padding:10px;margin-bottom:12px;">';
+    h+='<p style="font-size:12px;color:#fcd34d;margin:0;">\u05DB\u05D5\u05E0\u05DF \u05D1\u05D9\u05EA \u05E0\u05E1\u05E4\u05E8 \u05DB\u05E1\u05D2\u05D9\u05E8\u05D4 \u05E8\u05E7 \u05D0\u05DD \u05D4\u05D9\u05EA\u05D4 \u05E4\u05E2\u05D9\u05dc\u05D5\u05EA. \u05E0\u05D9\u05EA\u05DF \u05DC\u05E1\u05DE\u05DF \u05D6\u05D0\u05EA \u05D0\u05D7\u05E8\u05D9 \u05D4\u05E1\u05D5\u05E4\u05F4\u05E9 \u05D1\u05DB\u05E8\u05D8\u05D9\u05E1 \u05D4\u05E1\u05D2\u05D9\u05E8\u05D4.</p></div>';
+  }
+  // actions
+  h+='<button onclick="__a.autoFill()" style="width:100%;padding:8px;background:rgba(5,150,105,0.2);color:#34d399;border:1px solid #059669;border-radius:8px;font-size:13px;cursor:pointer;margin-bottom:8px;">\u05DE\u05DC\u05D0 \u05D4\u05DB\u05DC \u05D0\u05D5\u05D8\u05D5\u05DE\u05D8\u05D9\u05EA (\u05DC\u05E4\u05D9 \u05D4\u05D5\u05D2\u05E0\u05D5\u05EA)</button>';
+  h+='<button onclick="__a.saveBuild()" style="width:100%;padding:10px;background:#059669;color:white;border-radius:8px;font-size:14px;font-weight:bold;border:none;cursor:pointer;margin-bottom:8px;">\u05E9\u05DE\u05D5\u05E8 \u05E1\u05D2\u05D9\u05E8\u05D4</button>';
+  h+='<button onclick="__a.cancelEdit()" style="width:100%;padding:8px;background:#27272a;color:#a1a1aa;border-radius:8px;font-size:13px;border:none;cursor:pointer;">\u05D1\u05D9\u05D8\u05D5\u05DC</button>';
+  h+='</div>';
+  return h;
+}
+
+function renderForecast(){
+  var allW = history.slice().sort(function(a,b){
+    var da=endDateOf(a.date),db=endDateOf(b.date); return (da?da.getTime():0)-(db?db.getTime():0);
+  });
+  var counts = calcCounts(history);
+  var activeF = fighters.filter(function(f){return f.active;});
+  var today = Date.now();
+
+  function closersOf(w){
+    if(w.type==="op"){ return w.opSize==="full" ? (w.people||[]) : []; }
+    var ids=[];
+    weekSlots(w).forEach(function(sl){
+      if(sl.role==="konan" && !w.konanActivated) return;
+      if(sl.role==="kk" && (sl.kkType||"full")!=="full") return;
+      ids=ids.concat(sl.people);
+    });
+    return ids;
+  }
+  // counting weeks only (weeks where at least someone closes)
+  var countingWeeks = allW.filter(function(w){ return closersOf(w).length>0; });
+  var futureWeeks = allW.filter(function(w){ var d=endDateOf(w.date); return d && d.getTime()>=today; });
+
+  var h='<div>';
+  h+='<h2 style="font-weight:600;margin:0 0 4px;color:white;">\u05EA\u05D7\u05D6\u05D9\u05EA \u05D4\u05E6\u05D5\u05D5\u05EA</h2>';
+  h+='<p style="color:#71717a;font-size:12px;margin:0 0 16px;">\u05D0\u05D9\u05DA \u05D4\u05E6\u05D5\u05D5\u05EA \u05D9\u05D5\u05E6\u05D0 \u05D1\u05EA\u05E7\u05D5\u05E4\u05D4 \u05D4\u05E0\u05D5\u05DB\u05D7\u05D9\u05EA</p>';
+
+  // ===== 1. TEAM SUMMARY =====
+  var totalClosures = 0;
+  activeF.forEach(function(f){ totalClosures += (counts[f.id]?counts[f.id].total:0); });
+  var avg = activeF.length ? (totalClosures/activeF.length) : 0;
+  var totals = activeF.map(function(f){return counts[f.id]?counts[f.id].total:0;});
+  var maxT=Math.max.apply(null,totals.concat([0])), minT=Math.min.apply(null,totals.concat([0]));
+  var busiest = activeF.slice().sort(function(a,b){return (counts[b.id]?counts[b.id].total:0)-(counts[a.id]?counts[a.id].total:0);})[0];
+  var freest = activeF.slice().sort(function(a,b){return (counts[a.id]?counts[a.id].total:0)-(counts[b.id]?counts[b.id].total:0);})[0];
+
+  // ---- team rhythm: on average, how many weekends between one closure and the next, per person ----
+  // = (total person-weeks) / (total closures). Equivalent to activeCount / avgClosersPerWeek.
+  function closersCount(w){
+    if(w.type==="op") return w.opSize==="full" ? (w.people||[]).length : 0;
+    var n=0; weekSlots(w).forEach(function(sl){
+      if(sl.role==="konan" && !w.konanActivated) return;
+      if(sl.role==="kk" && (sl.kkType||"full")!=="full") return;
+      if(sl.role==="mkBoker" || sl.role==="mkErev") return;
+      n+=sl.people.filter(function(id){var ff=F(id);return ff&&ff.active;}).length;
+    });
+    return n;
+  }
+  var totalCloserSlots=0;
+  countingWeeks.forEach(function(w){ totalCloserSlots += closersCount(w); });
+  // every X weekends a given person closes (on average)
+  var everyN = totalCloserSlots>0 ? (activeF.length * countingWeeks.length / totalCloserSlots) / countingWeeks.length : 0;
+  // that simplifies to activeF.length / avgClosersPerWeek
+  var avgClosersPerWeek = countingWeeks.length>0 ? totalCloserSlots/countingWeeks.length : 0;
+  everyN = avgClosersPerWeek>0 ? activeF.length/avgClosersPerWeek : 0;
+  // build the rhythm string: "יוצא יוצא סוגר" - (round(everyN)-1) times יוצא + סוגר
+  function rhythmString(n){
+    // round to nearest whole weekend-gap; .5 rounds down (more conservative / matches lived experience)
+    var r = Math.max(1, Math.floor(n + 0.5));
+    // if it is essentially "every 2" but slightly above, floor keeps it honest
+    if(n>0 && n < 1.5) r = 1;
+    if(r<=1) return "\u05E1\u05D5\u05D2\u05E8 \u05DB\u05DC \u05E9\u05D1\u05D5\u05E2"; // closes every week
+    var parts=[];
+    for(var i=0;i<r-1;i++) parts.push("\u05D9\u05D5\u05E6\u05D0");
+    parts.push("\u05E1\u05D5\u05D2\u05E8");
+    return parts.join(" \u00B7 ");
+  }
+
+  function statBox(label, value, sub, color){
+    return '<div style="background:#18181b;border-radius:12px;border:1px solid #27272a;padding:14px;"><div style="font-size:24px;font-weight:bold;color:'+(color||"white")+';">'+value+'</div><div style="font-size:12px;color:#a1a1aa;margin-top:2px;">'+label+'</div>'+(sub?'<div style="font-size:11px;color:#52525b;margin-top:2px;">'+sub+'</div>':'')+'</div>';
+  }
+  // team rhythm (average) box
+  var secRhythm='<div style="background:linear-gradient(135deg,rgba(37,99,235,0.15),rgba(5,150,105,0.12));border:1px solid rgba(37,99,235,0.3);border-radius:12px;padding:16px;margin-bottom:16px;text-align:center;">';
+  secRhythm+='<div style="font-size:12px;color:#93c5fd;margin-bottom:6px;">\u05D4\u05DE\u05E7\u05E6\u05D1 \u05D4\u05E6\u05D5\u05D5\u05EA\u05D9 \u05D4\u05DE\u05DE\u05D5\u05E6\u05E2</div>';
+  secRhythm+='<div style="font-size:20px;font-weight:bold;color:white;letter-spacing:1px;">'+rhythmString(everyN)+'</div>';
+  secRhythm+='<div style="font-size:11px;color:#71717a;margin-top:6px;">\u05D1\u05DE\u05DE\u05D5\u05E6\u05E2 \u05DB\u05DC \u05DC\u05D5\u05D7\u05DD \u05E1\u05D5\u05D2\u05E8 \u05E4\u05E2\u05DD \u05D1\u05DB\u05BE~'+ (everyN>0?everyN.toFixed(1):"-") +' \u05E1\u05D5\u05E4\u05F4\u05E9\u05D9\u05DD</div>';
+  secRhythm+='</div>';
+  // נטחן / בבית boxes
+  var secBoxes='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;">';
+  secBoxes+=statBox("\u05D4\u05DB\u05D9 \u05E0\u05D8\u05D7\u05DF", busiest?esc(busiest.name):"-", (busiest?(counts[busiest.id]?counts[busiest.id].total:0)+" \u05E1\u05D2\u05D9\u05E8\u05D5\u05EA":""), "#f59e0b");
+  secBoxes+=statBox("\u05D4\u05DB\u05D9 \u05D1\u05D1\u05D9\u05EA", freest?esc(freest.name):"-", (freest?(counts[freest.id]?counts[freest.id].total:0)+" \u05E1\u05D2\u05D9\u05E8\u05D5\u05EA":""), "#34d399");
+  secBoxes+='</div>';
+  // balance bar
+  var spread=maxT-minT;
+  var balColor = spread<=1 ? "#34d399" : spread<=2 ? "#fbbf24" : "#f87171";
+  var balText = spread<=1 ? "\u05D4\u05E6\u05D5\u05D5\u05EA \u05DE\u05D0\u05D5\u05D6\u05DF \u05DE\u05D0\u05D5\u05D3" : spread<=2 ? "\u05D0\u05D9\u05D6\u05D5\u05DF \u05E1\u05D1\u05D9\u05E8" : "\u05D9\u05E9 \u05E4\u05E2\u05E8 \u2014 \u05DB\u05D3\u05D0\u05D9 \u05DC\u05D0\u05D6\u05DF";
+  var secBalance='<div style="background:'+balColor+'1a;border:1px solid '+balColor+'55;border-radius:10px;padding:12px;margin-bottom:16px;text-align:center;"><span style="color:'+balColor+';font-weight:600;font-size:14px;">'+balText+'</span><span style="color:#71717a;font-size:12px;"> \u00B7 \u05E4\u05E2\u05E8 \u05DE\u05E7\u05E1\u05D9\u05DE\u05DC\u05D9 '+spread+' \u05E1\u05D2\u05D9\u05E8\u05D5\u05EA</span></div>';
+
+  // ===== 2. PERSONAL RHYTHM =====
+  var secPersonal='';
+  secPersonal+='<div style="background:#18181b;border-radius:12px;border:1px solid #27272a;padding:14px;margin-bottom:16px;">';
+  secPersonal+='<p style="font-weight:600;font-size:14px;color:white;margin:0 0 12px;">\u05E7\u05E6\u05D1 \u05D0\u05D9\u05E9\u05D9</p>';
+  // compute rhythm: span of counting weeks / closures per fighter; and next closure date
+  var firstW = countingWeeks[0] ? endDateOf(countingWeeks[0].date) : null;
+  var lastW = countingWeeks[countingWeeks.length-1] ? endDateOf(countingWeeks[countingWeeks.length-1].date) : null;
+  var rhythmF = activeF.slice().sort(function(a,b){return (counts[a.id]?counts[a.id].total:0)-(counts[b.id]?counts[b.id].total:0);});
+  rhythmF.forEach(function(f){
+    var tot = counts[f.id]?counts[f.id].total:0;
+    // find next future week where this fighter closes
+    var nextClose=null;
+    for(var i=0;i<allW.length;i++){
+      var w=allW[i]; var d=endDateOf(w.date);
+      if(d && d.getTime()>=today && closersOf(w).indexOf(f.id)!==-1){ nextClose=w.date; break; }
+    }
+    // rhythm: every ~N weeks (countingWeeks / tot)
+    var rhythmTxt;
+    if(tot===0){ rhythmTxt="\u05E2\u05D3\u05D9\u05D9\u05DF \u05DC\u05D0 \u05E1\u05D2\u05E8"; }
+    else { var every=(countingWeeks.length/tot); rhythmTxt="\u05E1\u05D5\u05D2\u05E8 \u05DB\u05DC ~"+every.toFixed(1)+" \u05E9\u05D1\u05D5\u05E2\u05D5\u05EA"; }
+    secPersonal+='<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #27272a;">';
+    secPersonal+='<span style="font-size:14px;color:white;min-width:80px;">'+esc(f.name)+'</span>';
+    secPersonal+='<span style="font-size:12px;color:#71717a;flex:1;">'+rhythmTxt+'</span>';
+    if(nextClose) secPersonal+='<span style="font-size:11px;color:#fbbf24;background:rgba(120,53,15,0.3);padding:2px 8px;border-radius:999px;white-space:nowrap;">\u05D4\u05D1\u05D0: '+esc(nextClose)+'</span>';
+    else secPersonal+='<span style="font-size:11px;color:#52525b;">\u05D0\u05D9\u05DF \u05DE\u05EA\u05D5\u05DB\u05E0\u05DF</span>';
+    secPersonal+='<span style="font-size:13px;color:#a1a1aa;font-family:monospace;min-width:20px;text-align:left;">'+tot+'</span>';
+    secPersonal+='</div>';
+  });
+  secPersonal+='</div>';
+
+  // ===== 3. WEEK GRID =====
+  var secGrid='';
+  secGrid+='<div style="background:#18181b;border-radius:12px;border:1px solid #27272a;padding:14px;overflow-x:auto;">';
+  secGrid+='<p style="font-weight:600;font-size:14px;color:white;margin:0 0 4px;">\u05DC\u05D5\u05D7 \u05E9\u05D1\u05D5\u05E2\u05D5\u05EA</p>';
+  secGrid+='<p style="font-size:11px;color:#52525b;margin:0 0 12px;">\u05E1=\u05E1\u05D5\u05D2\u05E8 \u00B7 \u05DB=\u05DB\u05D5\u05E0\u05DF \u00B7 \u05E0\u05E7\u05D5\u05D3\u05D4=\u05D9\u05D5\u05E6\u05D0</p>';
+  if(allW.length===0){
+    secGrid+='<p style="color:#52525b;font-size:13px;">\u05D0\u05D9\u05DF \u05E1\u05D2\u05D9\u05E8\u05D5\u05EA</p>';
+  } else {
+    secGrid+='<table style="border-collapse:collapse;font-size:11px;color:white;width:100%;">';
+    secGrid+='<tr><th style="text-align:right;padding:4px 8px;position:sticky;right:0;background:#18181b;"></th>';
+    allW.forEach(function(w){
+      var d=endDateOf(w.date); var isPast = d && d.getTime()<today;
+      secGrid+='<th style="padding:4px 5px;color:'+(isPast?"#52525b":"#a1a1aa")+';font-weight:500;writing-mode:vertical-rl;white-space:nowrap;font-size:10px;">'+esc(w.date)+'</th>';
+    });
+    secGrid+='</tr>';
+    var sortedF = activeF.slice().sort(function(a,b){return (counts[b.id]?counts[b.id].total:0)-(counts[a.id]?counts[a.id].total:0);});
+    sortedF.forEach(function(f){
+      secGrid+='<tr><td style="padding:4px 8px;white-space:nowrap;position:sticky;right:0;background:#18181b;border-left:1px solid #27272a;">'+esc(f.name)+'</td>';
+      allW.forEach(function(w){
+        var closing=closersOf(w).indexOf(f.id)!==-1;
+        var isKonan=false;
+        if(w.type!=="op") weekSlots(w).forEach(function(sl){ if(sl.role==="konan" && !w.konanActivated && sl.people.indexOf(f.id)!==-1) isKonan=true; });
+        var cell,bg,col;
+        if(closing){ cell="\u05E1"; bg="rgba(5,150,105,0.3)"; col="#34d399"; }
+        else if(isKonan){ cell="\u05DB"; bg="rgba(120,53,15,0.25)"; col="#fb923c"; }
+        else { cell="\u00B7"; bg="transparent"; col="#3f3f46"; }
+        secGrid+='<td style="text-align:center;padding:4px 5px;background:'+bg+';color:'+col+';font-weight:'+(closing?"bold":"normal")+';">'+cell+'</td>';
+      });
+      secGrid+='</tr>';
+    });
+    secGrid+='</table>';
+  }
+  secGrid+='</div>';
+
+  // assemble: team rhythm, then נטחן/בבית, then balance, personal rhythm, week grid
+  h+=secRhythm;
+  h+=secBoxes;
+  h+=secBalance;
+  h+=secPersonal;
+  h+=secGrid;
+  h+='</div>';
+  return h;
+}
+function renderStats(counts){
+  var h='<div><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><h2 style="font-weight:600;margin:0;color:white;">סטטיסטיקות</h2>';
+  h+='<span style="font-size:11px;color:#52525b;">לחץ על לוחם לפירוט</span></div>';
+  var sorted=fighters.slice().sort(function(a,b){
+    // active fighters first, inactive at the bottom
+    if(a.active!==b.active) return a.active ? -1 : 1;
+    return (counts[b.id]?counts[b.id].total:0)-(counts[a.id]?counts[a.id].total:0);
+  });
+  var maxVal=Math.max.apply(null,fighters.map(function(x){return counts[x.id]?counts[x.id].total:0;}).concat([1]));
+  sorted.forEach(function(f){
+    var c=counts[f.id]||{total:0,atlit:0,t23:0,mkKK:0,mkutz:0};
+    var pct=(c.total/maxVal)*100;
+    var open=!!statsExpanded[f.id];
+    var totalShort = (c.mkutz||0) + (c.opMorning||0) + (c.opEvening||0);
+    h+='<div style="background:#18181b;border-radius:12px;border:1px solid '+(f.active?"#27272a":"#1c1c1f")+';padding:12px;margin-bottom:8px;opacity:'+(f.active?1:0.4)+';cursor:pointer;" onclick="__a.toggleStat(\''+f.id+'\')">';
+    // compact row: chevron + name + (short badge) + total
+    h+='<div style="display:flex;align-items:center;gap:8px;">';
+    h+='<span style="font-size:11px;color:#52525b;transition:transform 0.2s;">'+(open?"\u25BC":"\u25C0")+'</span>';
+    h+='<span style="font-size:14px;font-weight:600;color:white;">'+esc(f.name)+'</span>';
+    if(!f.active) h+='<span style="font-size:11px;color:#52525b;background:#27272a;padding:2px 6px;border-radius:4px;">\u05dc\u05d0 \u05e4\u05e2\u05d9\u05dc</span>';
+    if(totalShort>0 && !open) h+='<span style="font-size:10px;color:#d8b4fe;background:rgba(88,28,135,0.3);padding:2px 6px;border-radius:4px;">'+totalShort+' \u05de\u05e7\u05d5\u05e6\u05e8\u05d5\u05ea</span>';
+    h+='<span style="margin-right:auto;font-size:13px;color:#a1a1aa;font-family:monospace;font-weight:600;">'+c.total+'</span></div>';
+    // bar
+    h+='<div style="height:6px;background:#27272a;border-radius:999px;overflow:hidden;margin-top:8px;"><div style="height:100%;width:'+pct+'%;background:#f59e0b;border-radius:999px;"></div></div>';
+    // detail (only when open)
+    if(open){
+      h+='<div style="display:flex;gap:12px;font-size:12px;color:#71717a;flex-wrap:wrap;margin-top:10px;">';
+      h+='<span><span style="color:#34d399;">'+c.atlit+'</span> \u05e6 \u05e6\u05e4\u05d5\u05df</span>';
+      h+='<span><span style="color:#60a5fa;">'+c.t23+'</span> \u05e6\u05f423</span>';
+      if(c.sadat>0) h+='<span><span style="color:#22d3ee;">'+c.sadat+'</span> \u05e9\u05d3\u05ea</span>';
+      if(c.kk>0) h+='<span><span style="color:#f59e0b;">'+c.kk+'</span> \u05db\u05f4\u05db</span>';
+      if(c.konan>0) h+='<span><span style="color:#fb923c;">'+c.konan+'</span> \u05db\u05d5\u05e0\u05df \u05d1\u05d9\u05ea</span>';
+      if(c.op>0) h+='<span><span style="color:#fbbf24;">'+c.op+'</span> \u05e4\u05f4 \u05de\u05d1\u05e6\u05e2\u05d9\u05ea</span>';
+      h+='</div>';
+      h+='<div style="margin-top:8px;padding-top:8px;border-top:1px solid #27272a;display:flex;gap:12px;font-size:12px;flex-wrap:wrap;">';
+      h+='<span style="color:'+(totalShort>0?"#d8b4fe":"#52525b")+';font-weight:'+(totalShort>0?"600":"400")+';">\u05de\u05e7\u05d5\u05e6\u05e8\u05d5\u05ea/\u05d7\u05d6\u05e8\u05d5\u05ea \u05de\u05d5\u05e7\u05d3\u05de\u05d5\u05ea: <span style="font-family:monospace;">'+totalShort+'</span></span>';
+      if(c.mkutz>0) h+='<span style="color:#a855f7;">'+c.mkutz+' \u05de\u05e7\u05d5\u05e6\u05e8\u05ea \u05db\u05f4\u05db</span>';
+      if(c.opMorning>0) h+='<span style="color:#fb923c;">'+c.opMorning+' \u05d1\u05d5\u05e7\u05e8</span>';
+      if(c.opEvening>0) h+='<span style="color:#fb923c;">'+c.opEvening+' \u05e2\u05e8\u05d1</span>';
+      h+='</div>';
+    }
+    h+='</div>';
+  });
+  h+='</div>';
+  return h;
+}
+// ---- startup ----
+loadLocal();      // show saved data instantly
+loaded = true;
+render();
+connectFirebase(); // then sync with cloud in background
+</script>
+</body>
+</html>
