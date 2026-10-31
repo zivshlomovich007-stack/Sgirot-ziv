@@ -14,6 +14,7 @@
   * { box-sizing:border-box; }
   body{margin:0;background:var(--bg);background-image:radial-gradient(rgba(236,230,210,.05) 1px,transparent 1px);background-size:22px 22px;color:var(--text);font-family:Heebo,system-ui,-apple-system,sans-serif;-webkit-tap-highlight-color:transparent;padding-bottom:env(safe-area-inset-bottom)}
   button,input,select{font-family:inherit}
+  label{text-align:start}
   h1,h2,h3{font-family:Secular One,Heebo,sans-serif;font-weight:400!important;letter-spacing:.01em}
   .top{padding:calc(env(safe-area-inset-top,0px) + 22px) 16px 14px;border-bottom:1px dashed var(--line2)}
   .top-in{max-width:640px;margin:0 auto;display:flex;align-items:flex-end;justify-content:space-between}
@@ -131,6 +132,7 @@ let statsExpanded = {};
 let opDate = "";
 let opSize = "full";
 let opPeople = [];
+let fEdit = null, fName = "", fTags = "", fSamal = false; // fighter editor: null | "new" | fighter id
 
 // ---- roster migration (non-destructive) ----
 // מוסיף לוחמים חדשים מהקוד ומסתיר לוחמים שסומנו hidden. לא נוגע בהיסטוריה.
@@ -148,13 +150,6 @@ function migrateRoster(){
 }
 
 // ---- firebase sync ----
-function syncFightersFromCode(){
-  fighters = FIGHTERS.map(function(f){ return Object.assign({}, f); });
-  pushToCloud();
-  showToast("רשימת הלוחמים עודכנה");
-  render();
-}
-
 function pushToCloud() {
   var v = Date.now();
   if(v <= localVersion) v = localVersion + 1;
@@ -618,10 +613,29 @@ function confirmDelete(id){
     showToast("הסגירה נמחקה");
   }
 }
+function openFighterEdit(id){
+  if(id==="new"){ fEdit="new"; fName=""; fTags=""; fSamal=false; }
+  else { var f=F(id); if(!f) return; fEdit=id; fName=f.name; fTags=f.role||""; fSamal=!!f.isSamal; }
+  render();
+}
+function saveFighter(){
+  var name=(fName||"").trim();
+  if(!name){ showToast("הכנס שם"); return; }
+  var tags=(fTags||"").trim();
+  if(fEdit==="new"){
+    fighters=fighters.concat([{ id:"f"+Date.now(), name:name, role:tags, isSamal:fSamal, active:true }]);
+  } else {
+    var eid=fEdit;
+    fighters=fighters.map(function(f){ return f.id===eid ? Object.assign({},f,{name:name,role:tags,isSamal:fSamal}) : f; });
+  }
+  fEdit=null; pushToCloud(); showToast("נשמר");
+}
 function toggleActive(id){ fighters=fighters.map(function(f){return f.id===id?Object.assign({},f,{active:!f.active}):f;}); pushToCloud(); render(); }
 function setView(v){ view=v; render(); }
 
-window.__a = { tryLogin, confirmDelete, editWeek, syncFightersFromCode,
+window.__a = { tryLogin, confirmDelete, editWeek,
+  openFighterEdit:openFighterEdit, saveFighter:saveFighter, cancelFighterEdit:function(){fEdit=null;render();},
+  setFSamal:function(){fSamal=!fSamal;render();},
   openReplace:function(wid,role,oldId){ replaceCtx={weekId:wid,role:role,oldId:oldId}; render(); },
   closeReplace:function(){ replaceCtx=null; render(); },
   doReplace:doReplace,
@@ -770,6 +784,8 @@ function _render(){
   document.querySelectorAll('input[id^="bLabel_"]').forEach(function(inp){
     inp.oninput=function(e){ var s=bSlots[parseInt(inp.id.split("_")[1],10)]; if(s) s.label=e.target.value; };
   });
+  var fni=document.getElementById("fNameInput"); if(fni) fni.oninput=function(e){ fName=e.target.value; };
+  var fti=document.getElementById("fTagsInput"); if(fti) fti.oninput=function(e){ fTags=e.target.value; };
   var pi=document.getElementById("pwdInput");
   if(pi){ pi.oninput=function(e){__a.setPwd(e.target.value);}; pi.onkeydown=function(e){__a.onPwdKey(e);}; }
 }
@@ -813,6 +829,20 @@ function plannedCard(w, title, hero){
   return h;
 }
 
+function renderFighterForm(){
+  var fill='width:100%;background:var(--surface2);border:1px solid var(--line2);border-radius:8px;padding:9px 12px;color:var(--text);font-size:14px;outline:none;box-sizing:border-box;';
+  var lbl='font-size:12px;color:var(--muted2);display:block;margin-bottom:4px;';
+  var h='<div style="background:var(--bg);border:1px solid var(--gold);border-radius:12px;padding:14px;margin-bottom:8px;">';
+  h+='<label style="'+lbl+'">שם</label><input id="fNameInput" type="text" value="'+esc(fName)+'" placeholder="שם הלוחם" style="'+fill+'margin-bottom:10px;">';
+  h+='<label style="'+lbl+'">תגים (מה שבא לך, מופרד בפסיקים)</label><input id="fTagsInput" type="text" value="'+esc(fTags)+'" placeholder="למשל: סמל, נגב, מתשאל" style="'+fill+'margin-bottom:10px;">';
+  h+='<button onclick="__a.setFSamal()" style="display:flex;align-items:center;gap:8px;background:none;border:none;color:var(--text);font-size:13px;cursor:pointer;padding:4px 0;margin-bottom:12px;">';
+  h+='<span style="width:18px;height:18px;border-radius:4px;border:2px solid '+(fSamal?"#10b981":"var(--faint)")+';background:'+(fSamal?"#10b981":"transparent")+';display:inline-flex;align-items:center;justify-content:center;color:white;font-size:11px;">'+(fSamal?"v":"")+'</span>סמל (יכול לשמש כסמל בצ צפון)</button>';
+  h+='<div style="display:flex;gap:8px;"><button onclick="__a.saveFighter()" style="flex:1;padding:10px;background:var(--ok);color:var(--text);border-radius:8px;font-size:14px;font-weight:bold;border:none;cursor:pointer;">שמור</button>';
+  h+='<button onclick="__a.cancelFighterEdit()" style="flex:1;padding:10px;background:var(--surface2);color:var(--muted2);border-radius:8px;font-size:14px;border:none;cursor:pointer;">ביטול</button></div>';
+  h+='</div>';
+  return h;
+}
+
 function renderMain(counts,prev,plannedWeeks){
   var h='';
   var sortedPlanned = plannedWeeks.slice().sort(function(a,b){ var da=endDateOf(a.date),db=endDateOf(b.date); return (da?da.getTime():0)-(db?db.getTime():0); });
@@ -827,16 +857,19 @@ function renderMain(counts,prev,plannedWeeks){
   }
   h+='<div style="background:var(--card);border-radius:14px;border:1px solid var(--line);padding:16px;">';
   h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><p style="font-weight:600;font-size:14px;margin:0;color:var(--text);">לוחמים</p>';
-  if(isAdmin) h+='<button onclick="__a.syncFightersFromCode()" style="font-size:11px;padding:4px 10px;border-radius:8px;border:1px solid var(--line2);background:var(--surface2);color:var(--muted2);cursor:pointer;">עדכן שמות/תגים</button>';
+  if(isAdmin) h+='<button onclick="__a.openFighterEdit(\'new\')" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1px solid var(--gold);background:transparent;color:var(--gold);cursor:pointer;">+ הוסף לוחם</button>';
   h+='</div>';
+  if(isAdmin && fEdit==="new") h+=renderFighterForm();
   var fightersSorted = fighters.filter(function(f){return !f.hidden;}).sort(function(a,b){ if(a.active!==b.active) return a.active?-1:1; return 0; });
   fightersSorted.forEach(function(f){
+    if(isAdmin && fEdit===f.id){ h+=renderFighterForm(); return; }
     h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;border:1px solid '+(f.active?"var(--line2)":"var(--surface2)")+';background:'+(f.active?"rgba(39,39,42,0.5)":"rgba(24,24,27,0.3)")+';margin-bottom:6px;opacity:'+(f.active?1:0.5)+';">';
     if(isAdmin) h+='<button onclick="__a.toggleActive(\''+f.id+'\')" style="width:16px;height:16px;border-radius:4px;border:1px solid '+(f.active?"#10b981":"var(--faint)")+';background:'+(f.active?"#10b981":"transparent")+';display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;color:var(--text);font-size:11px;padding:0;">'+(f.active?"v":"")+'</button>';
     h+='<span style="font-size:14px;font-weight:500;color:'+(f.active?"var(--text)":"var(--faint)")+';">'+esc(f.name)+'</span>';
     if(f.role) h+='<span style="font-size:11px;color:var(--muted);background:var(--surface2);padding:2px 6px;border-radius:4px;">'+esc(f.role)+'</span>';
     if(f.id===prev) h+='<span style="font-size:11px;color:#d8b4fe;background:rgba(88,28,135,0.3);padding:2px 6px;border-radius:4px;border:1px solid rgba(107,33,168,0.5);">מקוצרת</span>';
     h+='<span style="margin-right:auto;font-size:12px;color:var(--faint);font-family:Secular One,sans-serif;">'+(counts[f.id]?counts[f.id].total:0)+'</span>';
+    if(isAdmin) h+='<button onclick="__a.openFighterEdit(\''+f.id+'\')" style="background:none;border:1px solid var(--line2);border-radius:6px;color:#60a5fa;font-size:11px;cursor:pointer;padding:2px 8px;">ערוך</button>';
     h+='</div>';
   });
   h+='</div>';
