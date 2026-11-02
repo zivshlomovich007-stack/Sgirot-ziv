@@ -442,7 +442,7 @@ function toggleOpPerson(id){
 }
 function saveOp(){
   if(!opDate){ showToast("הכנס תאריך"); return; }
-  if(!validDate(opDate)){ showToast("תאריך לא תקין (למשל 26/07/2026)"); return; }
+  if(!validDate(opDate)){ showToast("תאריך לא תקין (למשל 07-09/10/2026)"); return; }
   if(opPeople.length===0){ showToast("בחר לוחמים"); return; }
   var w={ id:Date.now(), type:"op", date:opDate, opSize:opSize, people:opPeople.slice() };
   history=history.concat([w]);
@@ -564,7 +564,7 @@ function recommendSlotPerson(sIdx, pIdx){
 }
 function saveBuild(){
   if(!bDate){ showToast("הכנס תאריך"); return; }
-  if(!validDate(bDate)){ showToast("תאריך לא תקין (למשל 26/07/2026)"); return; }
+  if(!validDate(bDate)){ showToast("תאריך לא תקין (למשל 07-09/10/2026)"); return; }
   var slots = bSlots.map(function(sl){
     var o={ role:sl.role, people:sl.people.filter(Boolean), kkType:sl.kkType };
     if(sl.role==="custom") o.label=(sl.label||"").trim()||"אחר";
@@ -597,7 +597,10 @@ function nextFreeWeekend(){
       sat.setHours(23,59,59,0);
       if(!taken[sat.toDateString()]){
         var dd=function(n){ return (n<10?"0":"")+n; };
-        return dd(sat.getDate())+"/"+dd(sat.getMonth()+1)+"/"+sat.getFullYear();
+        var full=function(d){ return dd(d.getDate())+"/"+dd(d.getMonth()+1)+"/"+d.getFullYear(); };
+        if(day.getFullYear()!==sat.getFullYear()) return full(day)+"-"+full(sat);
+        if(day.getMonth()!==sat.getMonth()) return dd(day.getDate())+"/"+dd(day.getMonth()+1)+"-"+full(sat);
+        return dd(day.getDate())+"-"+dd(sat.getDate())+"/"+dd(sat.getMonth()+1)+"/"+sat.getFullYear();
       }
     }
   }
@@ -851,10 +854,6 @@ function renderMain(counts,prev,plannedWeeks){
     if(sortedPlanned[1]) h+=plannedCard(sortedPlanned[1], "הסופ״ש הבא", false);
     h+='<div style="height:8px;"></div>';
   }
-  if(isAdmin){
-    if(bSlots.length===0 && editId===null){ ensureBuilderReady(); }
-    h+=renderBuild();
-  }
   h+='<div style="background:var(--card);border-radius:14px;border:1px solid var(--line);padding:16px;">';
   h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><p style="font-weight:600;font-size:14px;margin:0;color:var(--text);">לוחמים</p>';
   if(isAdmin) h+='<button onclick="__a.openFighterEdit(\'new\')" style="font-size:12px;padding:5px 12px;border-radius:8px;border:1px solid var(--gold);background:transparent;color:var(--gold);cursor:pointer;">+ הוסף לוחם</button>';
@@ -882,8 +881,8 @@ function renderWeeks(weeks,planned){
   if(planned) h+='<p style="color:var(--muted);font-size:12px;margin:0 0 12px;">סגירות שאושרו קדימה. יעברו להיסטוריה אוטומטית אחרי שיעברו</p>';
   if(planned&&isAdmin){
     h+='<div style="display:flex;gap:8px;margin-bottom:12px;">';
-    h+='<button onclick="__a.newWeek()" style="flex:1;padding:10px;background:var(--gold);color:#1c1917;border-radius:8px;font-size:13px;font-weight:bold;border:none;cursor:pointer;">+ סגירת בט״ש</button>';
-    h+='<button onclick="__a.openOp()" style="flex:1;padding:10px;background:#b45309;color:var(--text);border-radius:8px;font-size:13px;font-weight:bold;border:none;cursor:pointer;">+ פעילות מבצעית</button>';
+    h+='<button onclick="__a.newWeek()" style="flex:1;padding:10px;background:var(--gold);color:#1c1917;border-radius:8px;font-size:13px;font-weight:bold;border:none;cursor:pointer;">סגירת בט״ש</button>';
+    h+='<button onclick="__a.openOp()" style="flex:1;padding:10px;background:#b45309;color:var(--text);border-radius:8px;font-size:13px;font-weight:bold;border:none;cursor:pointer;">פעילות מבצעית</button>';
     h+='</div>';
   }
   else h+='<div style="height:8px;"></div>';
@@ -945,7 +944,7 @@ function renderOp(counts){
   h+='<h2 style="font-weight:600;margin:0 0 4px;color:var(--gold);">פעילות מבצעית חדשה</h2>';
   h+='<p style="color:var(--muted);font-size:12px;margin:0 0 16px;">שיבוץ ידני · כולם יוצאים באותו גודל</p>';
   h+='<div style="margin-bottom:16px;"><label style="font-size:12px;color:var(--muted2);display:block;margin-bottom:4px;">תאריך</label>';
-  h+='<input id="opDateInput" type="text" value="'+esc(opDate)+'" placeholder="26/07/2026" style="width:100%;background:var(--surface2);border:1px solid var(--line2);border-radius:8px;padding:8px 12px;color:var(--text);font-size:14px;outline:none;box-sizing:border-box;"></div>';
+  h+='<input id="opDateInput" type="text" value="'+esc(opDate)+'" placeholder="07-09/10/2026" style="width:100%;background:var(--surface2);border:1px solid var(--line2);border-radius:8px;padding:8px 12px;color:var(--text);font-size:14px;outline:none;box-sizing:border-box;"></div>';
   h+='<div style="margin-bottom:16px;"><label style="font-size:12px;color:var(--muted2);display:block;margin-bottom:8px;">גודל הסגירה</label><div style="display:flex;gap:6px;flex-wrap:wrap;">';
   sizes.forEach(function(it){
     var t=it[0],l=it[1],sel=opSize===t;
@@ -990,7 +989,7 @@ function renderBuild(){
   h+='<h2 style="font-weight:600;margin:0 0 4px;color:var(--text);">'+(editId!==null?"עריכת סגירה":"סגירה חדשה")+'</h2>';
   h+='<p style="color:var(--muted);font-size:12px;margin:0 0 16px;">בנה את הסגירה חופשי · המלצה אוטומטית לכל מקום</p>';
   h+='<div style="margin-bottom:16px;"><label style="font-size:12px;color:var(--muted2);display:block;margin-bottom:4px;">תאריך</label>';
-  h+='<input id="bDateInput" type="text" value="'+esc(bDate)+'" placeholder="26/07/2026" style="'+fill+'"></div>';
+  h+='<input id="bDateInput" type="text" value="'+esc(bDate)+'" placeholder="07-09/10/2026" style="'+fill+'"></div>';
   bSlots.forEach(function(sl, sIdx){
     var rdef=ROLES[sl.role]||{label:sl.role,color:"var(--muted2)"};
     h+='<div style="background:rgba(39,39,42,0.5);border:1px solid var(--line2);border-radius:10px;padding:12px;margin-bottom:10px;">';
